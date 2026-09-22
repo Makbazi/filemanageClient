@@ -12,9 +12,15 @@ export function fmtSize(n: number): string {
   return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
 }
 
-export function fmtTime(t: TimeVal): string {
+/** 时间字段统一转 epoch 毫秒（本地=number，服务端=RFC3339 字符串）。 */
+export function toMillis(t: TimeVal): number {
   const ms = typeof t === "number" ? t : Date.parse(t);
-  if (!ms || isNaN(ms)) return "-";
+  return isNaN(ms) ? 0 : ms;
+}
+
+export function fmtTime(t: TimeVal): string {
+  const ms = toMillis(t);
+  if (!ms) return "-";
   const d = new Date(ms);
   const p = (x: number) => String(x).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;

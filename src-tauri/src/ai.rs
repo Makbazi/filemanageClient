@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::config::{read_json, state, write_json, AIConf};
+use crate::config::{state, AIConf};
+use crate::localdb;
 use crate::localfs::{kind_of, resolve_in_root};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,8 +28,14 @@ pub struct DescRecord {
     pub embedding: Vec<u8>, // 预留：向量检索
 }
 
+// 描述索引已存 localdb.sqlite3；沿用"整读整写 + 内存过滤/更新"语义（数据量小）。
+// 注意：仅在同步段取 db 锁，不跨 .await 持有。
 fn load_descs(st: &crate::config::AppState) -> Vec<DescRecord> {
-    read_json(&st.ai_index(), Vec::new())
+    localdb::load_descs(&st.db.lock().expect("db lock"))
+}
+
+fn save_descs(st: &crate::config::AppState, descs: &[DescRecord]) -> Result<(), String> {
+    localdb::save_descs(&st.db.lock().expect("db lock"), descs)
 }
 
 fn prompt_for(kind: &str, name: &str) -> String {
@@ -96,7 +103,7 @@ pub async fn ai_describe_local(
     } else {
         descs.push(rec.clone());
     }
-    write_json(&st.ai_index(), &descs)?;
+    save_descs(&st, &descs)?;
     Ok(rec)
 }
 

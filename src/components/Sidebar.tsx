@@ -1,5 +1,9 @@
+// 左侧导航（总结4）：可折叠——默认收成左缘小箭头标签，点击标签显示/隐藏。
+// 展开态含 文件/搜索/回收站/传输/AI 助手/用户/设置 跳转 + 本地目录与服务端来源列表。
+import { useEffect, useState } from "react";
 import type { AppConfig } from "../lib/types";
 import { active } from "../lib/api";
+import { subscribe } from "../lib/transfer";
 import {
   IconHdd,
   IconServer,
@@ -9,24 +13,49 @@ import {
   IconHome,
   IconSearch,
   IconFolder,
+  IconSwap,
+  IconUsers,
+  IconChevronRight,
 } from "./icons";
 
-export type View = "files" | "trash" | "ai" | "search";
+export type View = "files" | "trash" | "transfers" | "ai" | "search";
 
 interface Props {
   cfg: AppConfig;
   view: View;
   roots: { id: string; name: string }[]; // 当前服务端的根列表（本地模式为 localRoots）
+  /** 折叠态：只渲染一个小箭头标签（0.4.0，默认折叠） */
+  collapsed: boolean;
   onView(v: View): void;
+  onToggleCollapse(): void;
   onPickLocalRoot(id: string): void;
   onPickServer(id: string): Promise<void>;
   onPickRoot(id: string): void;
   onOpenSettings(): void;
+  onOpenUsers(): void;
 }
 
 export default function Sidebar(p: Props) {
   const a = active();
   const serverName = (id: string) => p.cfg.servers.find((s) => s.id === id)?.name ?? id;
+  // "传输"角标：未完成任务数（排队/传输中/已暂停），注册表推送实时更新
+  const [activeTransfers, setActiveTransfers] = useState(0);
+  useEffect(
+    () =>
+      subscribe((list) =>
+        setActiveTransfers(list.filter((t) => t.status === "running" || t.status === "queued" || t.status === "paused").length)
+      ),
+    []
+  );
+
+  if (p.collapsed) {
+    return (
+      <button className="sidebar-tab" title="显示导航栏" onClick={p.onToggleCollapse}>
+        <IconChevronRight size={15} />
+      </button>
+    );
+  }
+
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -37,6 +66,11 @@ export default function Sidebar(p: Props) {
           <div className="brand-name">FileManage</div>
           <div className="brand-sub">云盘式文件管理</div>
         </div>
+        <button className="icon-btn brand-collapse" title="收起导航栏" onClick={p.onToggleCollapse}>
+          <span className="flip">
+            <IconChevronRight size={15} />
+          </span>
+        </button>
       </div>
 
       <nav className="nav">
@@ -49,8 +83,18 @@ export default function Sidebar(p: Props) {
         <button className={p.view === "trash" ? "nav-item active" : "nav-item"} onClick={() => p.onView("trash")}>
           <IconTrash size={17} /> 回收站
         </button>
+        <button
+          className={p.view === "transfers" ? "nav-item active" : "nav-item"}
+          onClick={() => p.onView("transfers")}
+        >
+          <IconSwap size={17} /> 传输
+          {activeTransfers > 0 && <span className="badge ok">{activeTransfers}</span>}
+        </button>
         <button className={p.view === "ai" ? "nav-item active" : "nav-item"} onClick={() => p.onView("ai")}>
           <IconSparkles size={17} /> AI 助手
+        </button>
+        <button className="nav-item" onClick={p.onOpenUsers}>
+          <IconUsers size={17} /> 用户
         </button>
       </nav>
 
