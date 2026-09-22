@@ -1,29 +1,66 @@
-// 统一数据来源抽象：本地目录（invoke Rust 命令）与服务端（HTTP via Rust 代理）。
-// App 层只调用这里的函数，切换来源即切换 active 配置。
+// 统一数据访问门面：
+// - 配置单例（loadConfig/getConfig/saveConfig，持久化在 Rust 侧 config.json）
+// - source()：按当前激活来源构造 DataSource（本地/服务端，接口化设计）
+// - 服务端专属能力：登录/根列表/分享链接/目录权限（经 srv_call 代理）
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActiveConf,
+  AclEntry,
+  AclSubjects,
   AppConfig,
   DescRecord,
-  FsEntry,
   SearchHit,
   ServerRoot,
-  TrashItem,
+  ShareLinkInfo,
 } from "./types";
+import type { DataSource } from "./datasource";
+import { LocalSource } from "./local";
+import { ServerSource, srvCall } from "./server";
+import { AuthError } from "./errors";
 
-let cfg: AppConfig = {
-  localRoots: [],
-  servers: [],
-  ai: { provider: "none", baseUrl: "", apiKey: "", model: "" },
-};
+export { AuthError };
 
-export class AuthError extends Error {}
+function defaultConfig(): AppConfig {
+  return {
+    localRoots: [],
+    servers: [],
+    ai: { provider: "none", baseUrl: "", apiKey: "", model: "" },
+    active: null,
+    ui: {
+      theme: "dark-glass",
+      viewMode: "list",
+      restoreLastLocation: false,
+      lastLocation: null,
+      groupByKind: false,
+      sidebarCollapsed: true,
+      restoreSessions: true,
+      lastServerId: null,
+    },
+    transfer: { uploadLimitKbps: 0, downloadLimitKbps: 0 },
+    trashRetentionDays: 30,
+    credentials: [],
+  };
+}
+
+let cfg: AppConfig = defaultConfig();
+
+/** 兼容旧配置文件：补齐缺失的 ui/transfer 等字段。 */
+function normalize(c: AppConfig): AppConfig {
+  const base = defaultConfig();
+  return {
+    ...base,
+    ...c,
+    localRoots: c.localRoots ?? [],
+    servers: (c.servers ?? []).map((s) => ({ insecureTls: false, caFile: null, ...s })),
+    ai: c.ai ?? base.ai,
+    ui: { ...base.ui, ...(c.ui ?? {}) },
+    transfer: { ...base.transfer, ...(c.transfer ?? {}) },
+    trashRetentionDays: c.trashRetentionDays && c.trashRetentionDays > 0 ? c.trashRetentionDays : 30,
+  };
+}
 
 export async function loadConfig(): Promise<AppConfig> {
-  cfg = (await invoke("get_config")) as AppConfig;
-  if (!cfg.localRoots) cfg.localRoots = [];
-  if (!cfg.servers) cfg.servers = [];
-  if (!cfg.ai) cfg.ai = { provider: "none", baseUrl: "", apiKey: "", model: "" };
+  cfg = normalize((await invoke("get_config")) as AppConfig);
   return cfg;
 }
 
@@ -32,7 +69,7 @@ export function getConfig(): AppConfig {
 }
 
 export async function saveConfig(next: AppConfig): Promise<AppConfig> {
-  cfg = (await invoke("save_config", { config: next })) as AppConfig;
+  cfg = normalize((await invoke("save_config", { config: next })) as AppConfig);
   return cfg;
 }
 
@@ -42,171 +79,160 @@ export function active(): ActiveConf {
   return { kind: "local", rootId: r?.id ?? "" };
 }
 
-function q(rootId: string, path: string) {
-  return `rootId=${encodeURIComponent(rootId)}&path=${encodeURIComponent(path)}`;
+// ---------- 数据源工厂（带缓存，登录态变化时失效） ----------
+
+let src: DataSource | null = null;
+let srcKey = "";
+
+export function invalidateSource() {
+  src = null;
+  srcKey = "";
 }
 
-async function call(method: string, path: string, body?: unknown) {
+/** 当前激活来源的 DataSource。 */
+export function source(): DataSource {
+  const a = active();
+  const srv = a.kind === "server" ? cfg.servers.find((s) => s.id === a.serverId) : null;
+  const key = `${a.kind}|${a.serverId ?? ""}|${a.rootId}|${srv?.token ? 1 : 0}`;
+  if (!src || srcKey !== key) {
+    src =
+      a.kind === "local"
+        ? new LocalSource(a.rootId)
+        : new ServerSource(a.serverId ?? "", a.rootId, !srv?.token);
+    srcKey = key;
+  }
+  return src;
+}
+
+export function isServerMode(): boolean {
+  return active().kind === "server";
+}
+
+export function isAnonymous(): boolean {
+  return source().anonymous;
+}
+
+function activeServerId(): string {
   const a = active();
   if (a.kind !== "server" || !a.serverId) throw new Error("未选择服务端");
-  try {
-    return await invoke("srv_call", {
-      serverId: a.serverId,
-      method,
-      path,
-      body: body ?? null,
-    });
-  } catch (e) {
-    const msg = String(e);
-    if (msg.startsWith("AUTH_REQUIRED")) throw new AuthError(msg.replace(/^AUTH_REQUIRED:\s*/, ""));
-    throw new Error(msg);
-  }
+  return a.serverId;
 }
 
-export async function listFiles(path: string): Promise<FsEntry[]> {
-  const a = active();
-  if (a.kind === "local") {
-    return (await invoke("fs_list", { rootId: a.rootId, path })) as FsEntry[];
-  }
-  const data = (await call("GET", `/api/v1/files?${q(a.rootId, path)}`)) as { entries: FsEntry[] };
-  return data.entries ?? [];
+// ---------- 服务端认证 / 根列表 ----------
+
+export async function serverLogin(serverId: string, username: string, password: string, remember?: boolean) {
+  const r = await invoke("srv_login", { serverId, username, password, remember: remember ?? null });
+  await loadConfig();
+  invalidateSource();
+  return r;
 }
 
-export async function makeDir(path: string): Promise<void> {
-  const a = active();
-  if (a.kind === "local") return invoke("fs_mkdir", { rootId: a.rootId, path });
-  await call("POST", "/api/v1/mkdir", { rootId: a.rootId, path });
+// ---------- 记住的账户密码（0.6.0 需求3） ----------
+
+/** 取回某服务端某账户已记住的密码（未记住/无凭证库时 null）。 */
+export function credTake(serverId: string, username: string): Promise<string | null> {
+  return invoke("cred_take", { serverId, username }) as Promise<string | null>;
 }
 
-export async function rename(path: string, newName: string): Promise<void> {
-  const a = active();
-  if (a.kind === "local") return invoke("fs_rename", { rootId: a.rootId, path, newName });
-  await call("POST", "/api/v1/rename", { rootId: a.rootId, path, newName });
-}
-
-export async function movePaths(paths: string[], dest: string): Promise<void> {
-  const a = active();
-  if (a.kind === "local") return invoke("fs_move", { rootId: a.rootId, paths, dest });
-  await call("POST", "/api/v1/move", { rootId: a.rootId, paths, dest });
-}
-
-export async function copyPaths(paths: string[], dest: string): Promise<void> {
-  const a = active();
-  if (a.kind === "local") return invoke("fs_copy", { rootId: a.rootId, paths, dest });
-  await call("POST", "/api/v1/copy", { rootId: a.rootId, paths, dest });
-}
-
-/** 删除（进回收站）。调用方必须先做二次确认。 */
-export async function deletePaths(paths: string[]): Promise<number> {
-  const a = active();
-  if (a.kind === "local") {
-    const items = (await invoke("fs_delete", { rootId: a.rootId, paths })) as TrashItem[];
-    return items.length;
-  }
-  const items = (await call("POST", "/api/v1/delete", { rootId: a.rootId, paths })) as TrashItem[];
-  return items.length;
-}
-
-export async function listTrash(): Promise<TrashItem[]> {
-  const a = active();
-  if (a.kind === "local") return (await invoke("fs_trash_list", { rootId: a.rootId })) as TrashItem[];
-  return (await call("GET", `/api/v1/trash?rootId=${encodeURIComponent(a.rootId)}`)) as TrashItem[];
-}
-
-export async function restoreTrash(trashId: string): Promise<void> {
-  const a = active();
-  if (a.kind === "local") return invoke("fs_trash_restore", { trashId });
-  await call("POST", "/api/v1/trash/restore", { trashId });
-}
-
-export async function removeTrash(trashId: string): Promise<void> {
-  const a = active();
-  if (a.kind === "local") return invoke("fs_trash_remove", { trashId });
-  await call("POST", "/api/v1/trash/remove", { trashId });
-}
-
-export async function clearTrash(): Promise<void> {
-  const a = active();
-  if (a.kind === "local") return invoke("fs_trash_clear", { rootId: a.rootId });
-  await call("POST", `/api/v1/trash/clear?rootId=${encodeURIComponent(a.rootId)}`);
-}
-
-export async function searchNames(query: string): Promise<FsEntry[]> {
-  const a = active();
-  if (a.kind === "local") return (await invoke("fs_search", { rootId: a.rootId, query })) as FsEntry[];
-  return (await call("POST", "/api/v1/search", { rootId: a.rootId, query })) as FsEntry[];
-}
-
-export async function preview(entry: FsEntry): Promise<string> {
-  const a = active();
-  if (a.kind === "local") return (await invoke("fs_preview", { rootId: a.rootId, path: entry.path })) as string;
-  // 服务端预览：下载到临时目录后读取
-  throw new Error("服务端文件请先下载到本地后预览");
-}
-
-// ---------- 传输 ----------
-
-/** 服务端 → 本机（dest 为本机完整路径） */
-export async function downloadToLocal(destPath: string, entryPath: string): Promise<void> {
-  const a = active();
-  if (a.kind !== "server") throw new Error("仅服务端来源支持下载");
-  await invoke("srv_download", {
-    serverId: a.serverId,
-    rootId: a.rootId,
-    path: entryPath,
-    destPath,
-  });
-}
-
-/** 本机文件 → 服务端目录 */
-export async function uploadLocalToServer(dir: string, localPath: string): Promise<void> {
-  const a = active();
-  if (a.kind !== "server") throw new Error("请切换到服务端来源");
-  await invoke("srv_upload", { serverId: a.serverId, rootId: a.rootId, dir, localPath });
-}
-
-/** 本机文件 → 当前本地目录 */
-export async function importToLocal(path: string, localPath: string): Promise<void> {
-  const a = active();
-  if (a.kind !== "local") throw new Error("本地模式才支持导入");
-  const name = localPath.split(/[\\/]/).pop() ?? "file";
-  const b64 = (await invoke("fs_read_bytes_b64", { path: localPath })) as string;
-  const dest = path ? `${path}/${name}` : name;
-  await invoke("fs_write_bytes_b64", { destPath: joinLocalAbs(dest), dataB64: b64 });
-}
-
-/** 管理接口泛用调用（当前激活的服务端）。 */
-export async function serverCall(method: string, path: string, body?: unknown): Promise<unknown> {
-  return call(method, path, body);
-}
-
-// ---------- 服务端专属（登录/根列表） ----------
-
-export async function serverLogin(serverId: string, username: string, password: string) {
-  return invoke("srv_login", { serverId, username, password });
+export async function credForget(serverId: string, username: string) {
+  await invoke("cred_forget", { serverId, username });
+  await loadConfig();
 }
 
 export async function serverLogout(serverId: string) {
   await invoke("srv_logout", { serverId });
-  await loadConfig(); // 刷新 token 状态
+  await loadConfig();
+  invalidateSource();
 }
 
-export async function fetchRoots(serverId: string): Promise<ServerRoot[]> {
-  return (await invoke("srv_call", { serverId, method: "GET", path: "/api/v1/roots", body: null })) as ServerRoot[];
+/** 自助改密（批次需求31）：Rust 侧同步更新已记住口令并清会话，成功后前端登录态作废。 */
+export async function serverChangePassword(oldPassword: string, newPassword: string) {
+  const r = await invoke<{ ok: boolean; reauthRequired: boolean; passwordSaved: boolean }>("srv_change_password", {
+    oldPassword,
+    newPassword,
+  });
+  await loadConfig();
+  invalidateSource();
+  return r;
 }
 
-export async function serverInfo(serverId: string): Promise<{ ok: boolean; db: string; version: string }> {
-  return (await invoke("srv_call", { serverId, method: "GET", path: "/api/v1/health", body: null })) as never;
+export function fetchRoots(serverId: string): Promise<ServerRoot[]> {
+  return srvCall<ServerRoot[]>(serverId, "GET", "/api/v1/roots");
 }
 
-// ---------- AI（预留） ----------
+export function serverInfo(serverId: string) {
+  return srvCall<{ ok: boolean; version: string; db: string; instanceId?: string }>(
+    serverId,
+    "GET",
+    "/api/v1/health"
+  );
+}
+
+/** 当前激活服务端的泛用调用（账户信息等）。async：未选服务端时返回 rejected Promise 而非同步 throw。 */
+export async function serverCall(method: string, path: string, body?: unknown) {
+  return srvCall(activeServerId(), method, path, body);
+}
+
+// ---------- 临时分享链接（需求7，服务端模式） ----------
+
+export function createShareLink(opts: {
+  rootId: string;
+  path: string;
+  expiresInHours?: number;
+  password?: string;
+  noPassword?: boolean;
+}): Promise<ShareLinkInfo> {
+  return srvCall<ShareLinkInfo>(activeServerId(), "POST", "/api/v1/share/links", opts);
+}
+
+export function listShareLinks(): Promise<ShareLinkInfo[]> {
+  return srvCall<ShareLinkInfo[]>(activeServerId(), "GET", "/api/v1/share/links");
+}
+
+export function updateShareLink(
+  token: string,
+  patch: { password?: string; noPassword?: boolean; expiresAt?: string | null; disabled?: boolean }
+): Promise<ShareLinkInfo> {
+  return srvCall<ShareLinkInfo>(activeServerId(), "PUT", `/api/v1/share/links/${token}`, patch);
+}
+
+export function deleteShareLink(token: string): Promise<void> {
+  return srvCall(activeServerId(), "DELETE", `/api/v1/share/links/${token}`);
+}
+
+// ---------- 目录权限（需求8/9，服务端模式） ----------
+
+export function getAcl(rootId: string, path: string) {
+  return srvCall<{ entries: AclEntry[]; effective: Record<string, boolean> }>(
+    activeServerId(),
+    "GET",
+    `/api/v1/acl?rootId=${encodeURIComponent(rootId)}&path=${encodeURIComponent(path)}`
+  );
+}
+
+export function putAcl(rootId: string, path: string, entries: AclEntry[]) {
+  return srvCall(activeServerId(), "PUT", "/api/v1/acl", { rootId, path, entries });
+}
+
+export function deleteAclEntry(id: number) {
+  return srvCall(activeServerId(), "DELETE", `/api/v1/acl/${id}`);
+}
+
+export function getAclSubjects(): Promise<AclSubjects> {
+  return srvCall<AclSubjects>(activeServerId(), "GET", "/api/v1/acl/subjects");
+}
+
+// ---------- AI ----------
 
 export async function aiDescribe(entryPath: string): Promise<DescRecord | { text: string }> {
   const a = active();
   if (a.kind === "local") {
     return (await invoke("ai_describe_local", { rootId: a.rootId, path: entryPath, ai: cfg.ai })) as DescRecord;
   }
-  return (await call("POST", "/api/v1/ai/describe", { rootId: a.rootId, path: entryPath })) as { text: string };
+  return srvCall<{ text: string }>(a.serverId!, "POST", "/api/v1/ai/describe", {
+    rootId: a.rootId,
+    path: entryPath,
+  });
 }
 
 export async function aiSearch(query: string): Promise<SearchHit[]> {
@@ -215,7 +241,7 @@ export async function aiSearch(query: string): Promise<SearchHit[]> {
     const recs = (await invoke("ai_search_local", { query })) as DescRecord[];
     return recs.map((r) => ({ ...r, score: 1 }));
   }
-  const hits = (await call("POST", "/api/v1/ai/search", { query })) as SearchHit[];
+  const hits = await srvCall<SearchHit[]>(a.serverId!, "POST", "/api/v1/ai/search", { query });
   return hits ?? [];
 }
 
@@ -226,8 +252,4 @@ export function joinLocalAbs(rel: string): string {
   if (!root) throw new Error("未选择本地目录");
   const clean = rel.replace(/^\/+/, "");
   return root.path.replace(/\/+$/, "") + "/" + clean;
-}
-
-export function isServerMode() {
-  return active().kind === "server";
 }

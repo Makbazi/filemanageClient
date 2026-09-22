@@ -1,0 +1,42 @@
+// 传输任务共享类型（0.6.0 需求4/5/6）：transfer.ts 任务注册表与传输 UI 共用此契约。
+// 状态字符串与 Rust "fm-transfer" 事件的 status 取值一致。
+export type TransferKind = "upload" | "download";
+
+/** queued/running/paused 为非终态；done/error/cancelled 为终态。 */
+export type TransferStatus = "queued" | "running" | "paused" | "done" | "error" | "cancelled";
+
+/** 状态文案（TransferPanel 浮出小窗与 TransfersView 管理页共用）。 */
+export const STATUS_LABEL: Record<TransferStatus, string> = {
+  queued: "排队中",
+  running: "传输中",
+  paused: "已暂停",
+  done: "完成",
+  error: "失败",
+  cancelled: "已取消",
+};
+
+export interface TransferTask {
+  /** transferId（uid()），Rust 进度事件按此归并。 */
+  id: string;
+  kind: TransferKind;
+  /**
+   * 入队任务必填（run 需要）；本地导入或仅事件展示的任务为空串——
+   * UI 据此决定 暂停/继续/重试 是否可用（断点重跑要求记录完整参数）。
+   */
+  serverId: string;
+  rootId: string;
+  name: string;
+  remotePath: string;
+  localPath: string;
+  /** 上传乐观并发锁（"-"=断言新文件，需求3）。 */
+  baseHash?: string;
+  /** 覆盖重试：执行前重新取目标哈希（服务端覆盖前自动版本快照）。 */
+  overwrite?: boolean;
+  status: TransferStatus;
+  sent: number;
+  /** 0 = 总大小未知（如流式下载无 Content-Length）。 */
+  total: number;
+  /** B/s，0 = 未知。 */
+  speed: number;
+  message: string;
+}

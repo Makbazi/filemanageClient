@@ -1,3 +1,7 @@
+//! 客户端配置：本地目录、多服务端、AI、界面偏好（主题/视图/位置恢复/会话恢复）、
+//! 传输限速、已记住的服务端账户索引（密码本体只进系统凭证库，本文件不落盘）。
+//! 配置存于 app_data_dir/config.json，tmp+rename 原子写。
+
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -14,6 +18,7 @@ pub struct RootConf {
 }
 
 /// 已配置的服务端（可配置多个）。
+/// token 为短期访问令牌；refresh_token 用于自动续期（需求22：3 周滑动会话）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerConf {
@@ -24,9 +29,17 @@ pub struct ServerConf {
     pub username: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// 信任自签证书（服务端 TLS 使用自签证书时开启，需求3）
+    #[serde(default)]
+    pub insecure_tls: bool,
+    /// 指定 CA 证书文件路径（PEM，0.4.0 安全升级：优先于 insecure_tls，避免全盘跳过校验）
+    #[serde(default)]
+    pub ca_file: Option<String>,
 }
 
-/// AI 能力配置（云厂商 OpenAI 兼容接口 / 本地 ollama），预留接入。
+/// AI 能力配置（云厂商 OpenAI 兼容接口 / 本地 ollama）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AIConf {
@@ -60,7 +73,100 @@ pub struct ActiveConf {
     pub root_id: String,
 }
 
+/// 上次关闭时的位置（需求21：启动时可选恢复）。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastLocation {
+    #[serde(default)]
+    pub active: Option<ActiveConf>,
+    #[serde(default)]
+    pub view: String, // files | trash | ai | search
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub view_mode: String, // list | grid
+}
+
+/// 已"记住密码"的服务端账户索引（0.6.0 需求3）。密码本体存系统凭证库
+/// （key 为 {serverId}/{username}/password），config.json 只存非敏感索引；
+/// 同一服务端可有多条（多账户），同一账户配到不同服务端按 serverId 隔离。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredRef {
+    pub server_id: String,
+    pub username: String,
+}
+
+/// 界面偏好（需求5/14/21）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiConf {
+    /// 主题：dark-glass | light | nord | dracula | ocean
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// 目录浏览风格：list（按行）| grid（按缩略图，需求14）
+    #[serde(default = "default_view_mode")]
+    pub view_mode: String,
+    /// 启动时恢复上次关闭位置（需求21）
+    #[serde(default)]
+    pub restore_last_location: bool,
+    #[serde(default)]
+    pub last_location: Option<LastLocation>,
+    /// 按文件类型分组显示（需求15）
+    #[serde(default)]
+    pub group_by_kind: bool,
+    /// 左侧导航栏是否折叠为小箭头标签（0.4.0；默认折叠，点击标签显隐）
+    #[serde(default = "default_true")]
+    pub sidebar_collapsed: bool,
+    /// 启动时是否恢复各服务端登录状态（0.6.0 需求9）。
+    /// true（默认）：上次保持登录的服务端重启后仍为登录态，可直接打开远程；
+    /// false：启动时清除全部令牌，所有服务端置为退出状态（已记住的密码保留）。
+    #[serde(default = "default_true")]
+    pub restore_sessions: bool,
+    /// 快速切换第二按钮指向的远程服务端 id（0.6.0 需求10）
+    #[serde(default)]
+    pub last_server_id: Option<String>,
+}
+
+fn default_theme() -> String {
+    "dark-glass".into()
+}
+fn default_view_mode() -> String {
+    "list".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_trash_days() -> i64 {
+    30
+}
+
+impl Default for UiConf {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            view_mode: default_view_mode(),
+            restore_last_location: false,
+            last_location: None,
+            group_by_kind: false,
+            sidebar_collapsed: true,
+            restore_sessions: true,
+            last_server_id: None,
+        }
+    }
+}
+
+/// 传输设置（需求18：限速，0 = 不限速）。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferConf {
+    #[serde(default)]
+    pub upload_limit_kbps: u32,
+    #[serde(default)]
+    pub download_limit_kbps: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     #[serde(default)]
@@ -71,21 +177,107 @@ pub struct AppConfig {
     pub ai: AIConf,
     #[serde(default)]
     pub active: Option<ActiveConf>,
+    #[serde(default)]
+    pub ui: UiConf,
+    #[serde(default)]
+    pub transfer: TransferConf,
+    /// 本地回收站自动清理保留天数（0.4.0，需求：与服务端各自独立的 30 天清理）
+    #[serde(default = "default_trash_days")]
+    pub trash_retention_days: i64,
+    /// 已记住密码的服务端账户索引（0.6.0 需求3；密码本体在系统凭证库）
+    #[serde(default)]
+    pub credentials: Vec<CredRef>,
 }
 
-/// 全局共享状态：配置目录 + 内存中的配置。
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            local_roots: Vec::new(),
+            servers: Vec::new(),
+            ai: AIConf::default(),
+            active: None,
+            ui: UiConf::default(),
+            transfer: TransferConf::default(),
+            trash_retention_days: default_trash_days(),
+            credentials: Vec::new(),
+        }
+    }
+}
+
+impl AppConfig {
+    /// 副本：清空服务端令牌——令牌存系统凭证库后 config.json 不再落盘明文（0.4.0）。
+    pub fn without_tokens(&self) -> AppConfig {
+        let mut c = self.clone();
+        for s in c.servers.iter_mut() {
+            s.token = None;
+            s.refresh_token = None;
+        }
+        c
+    }
+}
+
+/// 全局共享状态：配置目录 + 内存中的配置 + 本地元数据库。
 pub struct AppState {
     pub data_dir: PathBuf,
+    pub cache_dir: PathBuf,
     pub config: RwLock<AppConfig>,
+    /// 本地元数据库（localdb.sqlite3）。rusqlite Connection 为 Send 非 Sync，用 Mutex 保护；
+    /// 取锁仅限同步段，禁止跨 .await 持有。
+    pub db: std::sync::Mutex<rusqlite::Connection>,
+    /// 系统凭证库可用性（true 时 token 存 keyring，config.json 不落盘明文；0.4.0）。
+    pub keyring_ok: bool,
 }
 
 impl AppState {
-    pub fn load(data_dir: PathBuf) -> Self {
-        let cfg = read_config(&data_dir).unwrap_or_default();
-        Self {
-            data_dir,
-            config: RwLock::new(cfg),
+    pub fn load(data_dir: PathBuf, cache_dir: PathBuf) -> Result<Self, String> {
+        let mut cfg = read_config(&data_dir).unwrap_or_default();
+        let keyring_ok = crate::secret::available();
+        if keyring_ok {
+            let mut migrated = false;
+            for s in cfg.servers.iter_mut() {
+                if s.token.is_some() || s.refresh_token.is_some() {
+                    // 旧版明文 token → 一次性迁移进凭证库（config.json 稍后脱敏回写）
+                    let _ = crate::secret::set_tokens(&s.id, s.token.as_deref(), s.refresh_token.as_deref());
+                    migrated = true;
+                } else {
+                    let (t, r) = crate::secret::get_tokens(&s.id);
+                    if t.is_some() || r.is_some() {
+                        s.token = t;
+                        s.refresh_token = r;
+                    }
+                }
+            }
+            if migrated {
+                write_config(&data_dir, &cfg.without_tokens())?;
+            }
+        } else {
+            eprintln!("提示: 系统凭证库不可用，服务端令牌将以明文存于 config.json（建议启用 Keychain/Keyring/Secret Service）");
         }
+        // 0.6.0 需求9：关闭"启动恢复登录状态"时，上次保持登录的服务端在启动时一律置为退出
+        // （清内存令牌 + 凭证库令牌；已记住的密码保留，供下次快速登录）。
+        if !cfg.ui.restore_sessions {
+            let had = cfg.servers.iter().any(|s| s.token.is_some() || s.refresh_token.is_some());
+            if had {
+                for s in cfg.servers.iter_mut() {
+                    s.token = None;
+                    s.refresh_token = None;
+                    if keyring_ok {
+                        let _ = crate::secret::set_tokens(&s.id, None, None);
+                    }
+                }
+                let out = if keyring_ok { cfg.without_tokens() } else { cfg.clone() };
+                write_config(&data_dir, &out)?;
+            }
+        }
+        let _ = std::fs::create_dir_all(cache_dir.join("media"));
+        let db = crate::localdb::open_and_migrate(&data_dir)?;
+        Ok(Self {
+            data_dir,
+            cache_dir,
+            config: RwLock::new(cfg),
+            db: std::sync::Mutex::new(db),
+            keyring_ok,
+        })
     }
 
     pub fn config(&self) -> AppConfig {
@@ -98,11 +290,59 @@ impl AppState {
         f: F,
     ) -> Result<AppConfig, String> {
         let mut guard = self.config.write().expect("config lock");
+        let prev_ids: Vec<String> = guard.servers.iter().map(|s| s.id.clone()).collect();
+        let prev_creds: Vec<CredRef> = guard.credentials.clone();
+        // 0.6.0（需求1）：记录变更前的令牌，keyring 只写真正变化的条目——
+        // 前端位置持久化每 ~800ms 触发一次 save，全量重写会造成 Secret Service IPC 风暴。
+        let prev_tokens: Vec<(String, Option<String>, Option<String>)> = guard
+            .servers
+            .iter()
+            .map(|s| (s.id.clone(), s.token.clone(), s.refresh_token.clone()))
+            .collect();
         f(&mut guard);
         let snapshot = guard.clone();
         drop(guard);
-        write_config(&self.data_dir, &snapshot)?;
         let _ = app;
+        if self.keyring_ok {
+            // 被删除的服务端：连带清理凭证库条目（token + 该服务端全部已记住密码）
+            let new_ids: Vec<&str> = snapshot.servers.iter().map(|s| s.id.as_str()).collect();
+            for id in &prev_ids {
+                if !new_ids.contains(&id.as_str()) {
+                    crate::secret::remove(id);
+                    for c in prev_creds.iter().filter(|c| c.server_id == *id) {
+                        let _ = crate::secret::set_password(&c.server_id, &c.username, None);
+                    }
+                }
+            }
+            // 被移除的账户索引（如切换账户后清除记住）：清对应凭证库密码
+            for c in &prev_creds {
+                if !snapshot.credentials.contains(c) {
+                    let _ = crate::secret::set_password(&c.server_id, &c.username, None);
+                }
+            }
+            let mut ring_err = String::new();
+            for s in &snapshot.servers {
+                let changed = match prev_tokens.iter().find(|(id, _, _)| *id == s.id) {
+                    None => s.token.is_some() || s.refresh_token.is_some(),
+                    Some((_, pt, pr)) => pt != &s.token || pr != &s.refresh_token,
+                };
+                if changed {
+                    if let Err(e) =
+                        crate::secret::set_tokens(&s.id, s.token.as_deref(), s.refresh_token.as_deref())
+                    {
+                        ring_err = e;
+                    }
+                }
+            }
+            if ring_err.is_empty() {
+                return match write_config(&self.data_dir, &snapshot.without_tokens()) {
+                    Ok(()) => Ok(snapshot),
+                    Err(e) => Err(e),
+                };
+            }
+            eprintln!("警告: 写入系统凭证库失败，本轮回退明文存储 config.json: {ring_err}");
+        }
+        write_config(&self.data_dir, &snapshot)?;
         Ok(snapshot)
     }
 
@@ -129,12 +369,14 @@ impl AppState {
         self.data_dir.join("trash").join(root_id)
     }
 
-    pub fn trash_index(&self) -> PathBuf {
-        self.data_dir.join("trash.json")
+    /// 本地文件版本内容目录（需求13；版本索引已入 localdb.sqlite3）。
+    pub fn versions_dir(&self) -> PathBuf {
+        self.data_dir.join("versions")
     }
 
-    pub fn ai_index(&self) -> PathBuf {
-        self.data_dir.join("ai_descriptions.json")
+    /// 媒体预览缓存目录（asset 协议已授权该目录）。
+    pub fn media_cache_dir(&self) -> PathBuf {
+        self.cache_dir.join("media")
     }
 }
 
@@ -167,18 +409,10 @@ pub fn write_config(data_dir: &Path, cfg: &AppConfig) -> Result<(), String> {
     std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
 
-/// 供各模块共用的 JSON 文件读写。
+/// 读取 JSON 文件（仅用于一次性导入旧版 *.json 元数据）。
 pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, default: T) -> T {
     std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or(default)
-}
-
-pub fn write_json(path: &Path, v: &(impl Serialize + ?Sized)) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let b = serde_json::to_vec_pretty(v).map_err(|e| e.to_string())?;
-    std::fs::write(path, b).map_err(|e| e.to_string())
 }

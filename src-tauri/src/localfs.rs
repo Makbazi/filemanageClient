@@ -9,7 +9,8 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::config::{state, read_json, write_json, AppState};
+use crate::config::{state, AppState};
+use crate::localdb;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -232,12 +233,13 @@ pub async fn fs_copy(
     Ok(())
 }
 
+// 回收站索引已存 localdb.sqlite3；load/save 维持"整读整写"语义（数据量小）。
 fn load_trash(st: &AppState) -> Vec<TrashItem> {
-    read_json(&st.trash_index(), Vec::new())
+    localdb::load_trash(&st.db.lock().expect("db lock"))
 }
 
 fn save_trash(st: &AppState, items: &[TrashItem]) -> Result<(), String> {
-    write_json(&st.trash_index(), items)
+    localdb::save_trash(&st.db.lock().expect("db lock"), items)
 }
 
 /// 删除 = 移入回收站（真正删除由 restore/remove/clear 决定）。
@@ -368,9 +370,18 @@ pub async fn fs_trash_clear(app: AppHandle, root_id: Option<String>) -> Result<u
     Ok(n)
 }
 
-/// 按文件名递归搜索（限深限数）。
+/// 按条件递归搜索（需求12：名称/类型/大小/修改时间；限深限数）。
 #[tauri::command]
-pub async fn fs_search(app: AppHandle, root_id: String, query: String) -> Result<Vec<FsEntry>, String> {
+pub async fn fs_search(
+    app: AppHandle,
+    root_id: String,
+    query: String,
+    kinds: Option<Vec<String>>,
+    size_min: Option<i64>,
+    size_max: Option<i64>,
+    mtime_from: Option<i64>,
+    mtime_to: Option<i64>,
+) -> Result<Vec<FsEntry>, String> {
     let st = state(&app);
     let root = st.root_path(&root_id)?;
     let mut out = Vec::new();
@@ -379,6 +390,11 @@ pub async fn fs_search(app: AppHandle, root_id: String, query: String) -> Result
         root: &Path,
         dir: &Path,
         lq: &str,
+        kinds: &Option<Vec<String>>,
+        size_min: Option<i64>,
+        size_max: Option<i64>,
+        mtime_from: Option<i64>,
+        mtime_to: Option<i64>,
         depth: usize,
         out: &mut Vec<FsEntry>,
     ) {
@@ -398,17 +414,31 @@ pub async fn fs_search(app: AppHandle, root_id: String, query: String) -> Result
                 continue;
             }
             let p = de.path();
-            if name.to_lowercase().contains(lq) {
-                if let Ok(md) = de.metadata() {
-                    out.push(entry_from(root, &p, &md));
+            let is_dir = p.is_dir();
+            if let Ok(md) = de.metadata() {
+                let e = entry_from(root, &p, &md);
+                let name_ok = lq.is_empty() || name.to_lowercase().contains(lq);
+                let kind_ok = kinds.as_ref().map_or(true, |k| k.is_empty() || k.contains(&e.kind));
+                let mtime = e.mtime;
+                let size_ok = is_dir
+                    || (size_min.map_or(true, |m| md.len() as i64 >= m)
+                        && size_max.map_or(true, |m| md.len() as i64 <= m));
+                let time_ok = is_dir
+                    || (mtime_from.map_or(true, |m| mtime >= m)
+                        && mtime_to.map_or(true, |m| mtime <= m));
+                // 有大小/时间过滤条件时目录本身不作为结果
+                let has_filters = size_min.is_some() || size_max.is_some()
+                    || mtime_from.is_some() || mtime_to.is_some();
+                if name_ok && kind_ok && size_ok && time_ok && !(is_dir && has_filters) {
+                    out.push(e);
                 }
             }
-            if p.is_dir() {
-                walk(root, &p, lq, depth + 1, out);
+            if is_dir {
+                walk(root, &p, lq, kinds, size_min, size_max, mtime_from, mtime_to, depth + 1, out);
             }
         }
     }
-    walk(&root, &root, &lq, 0, &mut out);
+    walk(&root, &root, &lq, &kinds, size_min, size_max, mtime_from, mtime_to, 0, &mut out);
     out.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
@@ -449,31 +479,237 @@ pub async fn fs_preview(app: AppHandle, root_id: String, path: String) -> Result
     ))
 }
 
-/// 把文件保存到本地磁盘任意位置（下载目标路径由前端给出，不受根目录限制——
-/// 这是"导出到本机"，与管理范围无关）。
-#[tauri::command]
-pub async fn fs_write_bytes_b64(
-    app: AppHandle,
-    dest_path: String,
-    data_b64: String,
-) -> Result<(), String> {
-    let _ = state(&app);
-    let p = PathBuf::from(&dest_path);
-    if let Some(dir) = p.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+/// 本地回收站过期自动清理（0.4.0；启动时执行，需求：默认保留 30 天，独立于服务端策略）。
+/// 过期条目连同暂存实体一并彻底删除；保留天数取 AppConfig.trashRetentionDays（<=0 视为 30）。
+pub fn purge_expired_trash(st: &AppState) {
+    let days = st.config().trash_retention_days.max(1);
+    let cutoff = Local::now().timestamp_millis() - days * 86_400_000;
+    let items = load_trash(st);
+    if items.is_empty() || items.iter().all(|i| i.deleted_at >= cutoff) {
+        return;
     }
-    let b = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
-        .map_err(|e| e.to_string())?;
-    fs::write(&p, b).map_err(|e| e.to_string())
+    let (expired, kept): (Vec<TrashItem>, Vec<TrashItem>) =
+        items.into_iter().partition(|i| i.deleted_at < cutoff);
+    for i in &expired {
+        let _ = fs::remove_dir_all(st.trash_dir(&i.root_id).join(&i.trash_id));
+    }
+    if let Err(e) = save_trash(st, &kept) {
+        eprintln!("清理过期回收站失败: {e}");
+        return;
+    }
+    eprintln!("本地回收站: 已自动清理过期条目 {} 个（保留 {days} 天）", expired.len());
 }
 
-/// 读取本机任意文件为 base64（用于把本机文件上传到服务端）。
+// ---------- 本地导入（流式复制，无大小限制，覆盖前自动存版本） ----------
+
+/// 把本机文件导入当前本地目录（dest_rel 为相对根目录的目标完整路径）。
 #[tauri::command]
-pub async fn fs_read_bytes_b64(path: String) -> Result<String, String> {
-    let b = fs::read(&path).map_err(|e| e.to_string())?;
-    if b.len() > 100 << 20 {
-        return Err("文件超过 100MB，暂不支持".into());
+pub async fn fs_import(
+    app: AppHandle,
+    root_id: String,
+    dest_rel: String,
+    local_path: String,
+) -> Result<FsEntry, String> {
+    let st = state(&app);
+    let root = st.root_path(&root_id)?;
+    let dest = resolve_in_root(&root, &dest_rel)?;
+    if fs::metadata(&local_path).map_err(|e| e.to_string())?.is_dir() {
+        return Err("目录导入暂不支持".into());
     }
-    Ok(base64::engine::general_purpose::STANDARD.encode(&b))
+    if let Some(dir) = dest.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    // 覆盖已有文件前保存版本（需求13）
+    snapshot_version(&st, &root_id, dest_rel.trim_matches('/'), &dest)?;
+    let tmp = dest.with_extension(format!(
+        "{}.tmp",
+        dest.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    ));
+    fs::copy(&local_path, &tmp).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+    let md = fs::metadata(&dest).map_err(|e| e.to_string())?;
+    Ok(entry_from(&root, &dest, &md))
+}
+
+/// 把根目录内文件导出（下载）到本机任意路径（tmp+rename 原子写）。
+#[tauri::command]
+pub async fn fs_export(
+    app: AppHandle,
+    root_id: String,
+    path: String,
+    dest_path: String,
+) -> Result<(), String> {
+    let st = state(&app);
+    let root = st.root_path(&root_id)?;
+    let abs = resolve_in_root(&root, &path)?;
+    if !abs.is_file() {
+        return Err("不是文件".into());
+    }
+    let dest = PathBuf::from(&dest_path);
+    if let Some(dir) = dest.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let name = dest
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .ok_or("非法目标路径")?;
+    let tmp = dest.with_file_name(format!(".{name}.fmdownload"));
+    fs::copy(&abs, &tmp).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &dest).map_err(|e| e.to_string())
+}
+
+// ---------- 本地文件版本（需求13：保留最近 10 版，可回滚） ----------
+
+const MAX_LOCAL_VERSIONS: usize = 10;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalVersion {
+    pub id: String,
+    pub root_id: String,
+    pub path: String,
+    pub version_no: i64,
+    pub size: i64,
+    pub created_at: i64,
+}
+
+// 版本索引已存 localdb.sqlite3（版本内容文件仍在 versions_dir）。
+fn load_versions(st: &AppState) -> Vec<LocalVersion> {
+    localdb::load_versions(&st.db.lock().expect("db lock"))
+}
+
+fn save_versions(st: &AppState, v: &[LocalVersion]) -> Result<(), String> {
+    localdb::save_versions(&st.db.lock().expect("db lock"), v)
+}
+
+/// 把 abs 当前内容快照为 (root_id, rel) 的一个新版本；文件不存在则跳过。
+pub(crate) fn snapshot_version(st: &AppState, root_id: &str, rel: &str, abs: &Path) -> Result<(), String> {
+    let md = match fs::metadata(abs) {
+        Ok(m) if !m.is_dir() => m,
+        _ => return Ok(()),
+    };
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let dir = st.versions_dir().join(root_id);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::copy(abs, dir.join(&id)).map_err(|e| e.to_string())?;
+    let mut vers = load_versions(st);
+    let no = vers
+        .iter()
+        .filter(|v| v.root_id == root_id && v.path == rel)
+        .map(|v| v.version_no)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    vers.push(LocalVersion {
+        id,
+        root_id: root_id.to_string(),
+        path: rel.to_string(),
+        version_no: no,
+        size: md.len() as i64,
+        created_at: Local::now().timestamp_millis(),
+    });
+    // 修剪：同路径只保留最近 MAX_LOCAL_VERSIONS 版
+    vers.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    let mut kept: Vec<LocalVersion> = Vec::with_capacity(vers.len());
+    let mut group: Vec<LocalVersion> = Vec::new();
+    let flush = |group: &mut Vec<LocalVersion>, kept: &mut Vec<LocalVersion>| {
+        if group.len() > MAX_LOCAL_VERSIONS {
+            let drop_n = group.len() - MAX_LOCAL_VERSIONS;
+            for old in group.drain(..drop_n) {
+                let _ = fs::remove_file(st.versions_dir().join(&old.root_id).join(&old.id));
+            }
+        }
+        kept.append(group);
+    };
+    for v in vers {
+        if group.first().map_or(false, |g| g.root_id != v.root_id || g.path != v.path) {
+            flush(&mut group, &mut kept);
+        }
+        group.push(v);
+    }
+    flush(&mut group, &mut kept);
+    kept.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    save_versions(st, &kept)
+}
+
+#[tauri::command]
+pub async fn fs_versions_list(app: AppHandle, root_id: String, path: String) -> Result<Vec<LocalVersion>, String> {
+    let st = state(&app);
+    let rel = path.trim_matches('/');
+    let mut out: Vec<LocalVersion> = load_versions(&st)
+        .into_iter()
+        .filter(|v| v.root_id == root_id && v.path == rel)
+        .collect();
+    out.sort_by(|a, b| b.version_no.cmp(&a.version_no));
+    Ok(out)
+}
+
+/// 回滚到指定版本：当前内容先存为新版本，再用版本内容覆盖（原子替换）。
+#[tauri::command]
+pub async fn fs_versions_rollback(
+    app: AppHandle,
+    root_id: String,
+    path: String,
+    version_id: String,
+) -> Result<(), String> {
+    let st = state(&app);
+    let root = st.root_path(&root_id)?;
+    let rel = path.trim_matches('/');
+    let ver = load_versions(&st)
+        .into_iter()
+        .find(|v| v.id == version_id && v.root_id == root_id && v.path == rel)
+        .ok_or("版本不存在")?;
+    let content = st.versions_dir().join(&root_id).join(&ver.id);
+    if !content.exists() {
+        return Err("版本内容文件缺失".into());
+    }
+    let abs = resolve_in_root(&root, rel)?;
+    snapshot_version(&st, &root_id, rel, &abs)?;
+    if let Some(dir) = abs.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = abs.with_extension("fmrollback.tmp");
+    fs::copy(&content, &tmp).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &abs).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn fs_versions_remove(app: AppHandle, version_id: String) -> Result<(), String> {
+    let st = state(&app);
+    let mut vers = load_versions(&st);
+    let idx = vers.iter().position(|v| v.id == version_id).ok_or("版本不存在")?;
+    let ver = vers.remove(idx);
+    let _ = fs::remove_file(st.versions_dir().join(&ver.root_id).join(&ver.id));
+    save_versions(&st, &vers)
+}
+
+// ---------- 媒体预览缓存（需求11：视频/音频经 asset 协议播放） ----------
+
+fn cache_hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// 把本地根内文件硬链接（或复制）到媒体缓存目录，返回缓存绝对路径。
+/// asset 协议仅授权缓存目录，避免放开任意路径。
+#[tauri::command]
+pub async fn fs_media_cache(app: AppHandle, root_id: String, path: String) -> Result<String, String> {
+    let st = state(&app);
+    let root = st.root_path(&root_id)?;
+    let abs = resolve_in_root(&root, &path)?;
+    if !abs.is_file() {
+        return Err("不是文件".into());
+    }
+    let ext = path.rsplit('.').next().unwrap_or("bin");
+    let name = format!("{:x}.{}", cache_hash(&format!("{root_id}/{path}")), ext);
+    let dest = st.media_cache_dir().join(&name);
+    if !dest.exists() {
+        let linked = fs::hard_link(&abs, &dest);
+        if linked.is_err() {
+            fs::copy(&abs, &dest).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(dest.to_string_lossy().into_owned())
 }

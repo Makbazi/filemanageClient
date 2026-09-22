@@ -1,0 +1,105 @@
+// "上传到远程"对话框（0.6.0 需求7）：勾选一个/多个服务端，文件上传到各自的分配根目录；
+// 未登录或无可见目录的服务端不可勾选；多根服务端可选目标目录。提交后由传输队列执行。
+import { useEffect, useState } from "react";
+import type { AppConfig, ServerRoot } from "../lib/types";
+import * as api from "../lib/api";
+import { Modal } from "./Modals";
+import { IconUpload } from "./icons";
+
+interface Props {
+  cfg: AppConfig;
+  fileName: string;
+  onCancel(): void;
+  onSubmit(targets: { serverId: string; rootId: string }[]): void;
+}
+
+export default function UploadToDialog(p: Props) {
+  const [roots, setRoots] = useState<Record<string, ServerRoot[]>>({});
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [rootSel, setRootSel] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    p.cfg.servers.forEach((s) => {
+      if (!s.token) return;
+      api
+        .fetchRoots(s.id)
+        .then((rs) => {
+          if (cancelled) return;
+          const list = rs ?? [];
+          setRoots((prev) => ({ ...prev, [s.id]: list }));
+          setRootSel((prev) => ({ ...prev, [s.id]: list[0]?.id ?? "" }));
+        })
+        .catch(() => {
+          if (!cancelled) setRoots((prev) => ({ ...prev, [s.id]: [] }));
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggle = (id: string, on: boolean) =>
+    setPicked((prev) => {
+      const n = new Set(prev);
+      if (on) n.add(id);
+      else n.delete(id);
+      return n;
+    });
+
+  const submit = () => {
+    const targets = [...picked]
+      .map((sid) => ({ serverId: sid, rootId: rootSel[sid] || roots[sid]?.[0]?.id || "" }))
+      .filter((t) => t.rootId);
+    if (targets.length) p.onSubmit(targets);
+  };
+
+  return (
+    <Modal title={`上传到远程 · ${p.fileName}`} onClose={p.onCancel} width={460}>
+      {p.cfg.servers.length === 0 ? (
+        <div className="dim tip">尚未配置服务端，请先在设置 → 服务端中添加。</div>
+      ) : (
+        p.cfg.servers.map((s) => {
+          const loaded = s.id in roots;
+          const rs = roots[s.id] ?? [];
+          const usable = !!s.token && loaded && rs.length > 0;
+          return (
+            <div className="list-row" key={s.id}>
+              <label className="radio-item">
+                <input type="checkbox" disabled={!usable} checked={picked.has(s.id)} onChange={(e) => toggle(s.id, e.target.checked)} />
+                <span>{s.name || s.baseUrl}</span>
+              </label>
+              {!s.token ? (
+                <span className="badge">未登录，不可上传</span>
+              ) : !loaded ? (
+                <span className="dim">加载目录…</span>
+              ) : rs.length === 0 ? (
+                <span className="badge">无可见目录</span>
+              ) : rs.length > 1 ? (
+                <select className="sort-select" value={rootSel[s.id] ?? ""} onChange={(e) => setRootSel((prev) => ({ ...prev, [s.id]: e.target.value }))}>
+                  {rs.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="dim">{rs[0].name}</span>
+              )}
+            </div>
+          );
+        })
+      )}
+      <div className="dim tip">文件将上传到所选服务端的根目录（同名冲突可在"传输"界面用覆盖重试）。</div>
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={p.onCancel}>
+          取消
+        </button>
+        <button className="btn primary" disabled={!picked.size} onClick={submit}>
+          <IconUpload size={14} /> 上传到 {picked.size} 个服务端
+        </button>
+      </div>
+    </Modal>
+  );
+}

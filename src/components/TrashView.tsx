@@ -6,6 +6,10 @@ interface Props {
   items: TrashItem[];
   loading: boolean;
   error: string;
+  /** 本地模式（自动清理策略本机独立，0.4.0） */
+  isLocal: boolean;
+  /** 本地回收站保留天数 */
+  retentionDays: number;
   onRestore(item: TrashItem): void;
   onRemove(item: TrashItem): void;
   onClear(): void;
@@ -18,7 +22,12 @@ export default function TrashView(p: Props) {
       <div className="page-head">
         <div>
           <h2>回收站</h2>
-          <p className="dim">删除的文件会先进入回收站，还原将回到原位置。</p>
+          <p className="dim">
+            删除的文件会先进入回收站，还原将回到原位置。
+            {p.isLocal
+              ? `本地条目超过 ${p.retentionDays} 天将自动彻底清理（启动时执行，独立于服务端策略）。`
+              : "服务端条目按服务端保留策略自动清理。"}
+          </p>
         </div>
         <div className="toolbar-inline">
           <button className="btn" onClick={p.onRefresh}>
