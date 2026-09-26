@@ -101,7 +101,10 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.1.0；配套 filemanageServer **0.1.x（推荐）** / 0.7.x / 0.6.x。0.1.0 批次（需求31，自助改密）：
+0.1.0；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+**0.1.1 服务端（需求40：内置文件存储驱动 + 管理台切换/导出/暂停）对本客户端零影响**：
+`/api/v1` 数据协议零变更，客户端代码/版本号不改动，仅更新本兼容列表——暂停维护窗口内
+业务端点返回 503、health `db` 字段可能为 `"file"`，均落入客户端既有错误/探测容错路径。0.1.0 批次（需求31，自助改密）：
 账户页（Settings.tsx AccountTab）新增"修改我的密码"折叠表单（旧密码 + 新密码，前端校验
 ≥6 且不同于旧密码）；Rust 命令 `srv_change_password`（serverapi.rs + lib.rs 注册）POST
 `/api/v1/auth/change-password`——**不经 `srv_call`**（避免 401 自动续期掩盖"旧密码错"），
