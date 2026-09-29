@@ -33,15 +33,19 @@
 - `build.sh` 新增 `-i` / `-n` / `-V` 参数（对齐 filemanageServer/build.sh 同名参数）：
   - `-i [-a <平台>]`：仅构建编译环境镜像（docker build）后退出，不编译工程；`-a`
     限定对应环境镜像，缺省四环境全建。
-  - `-n [-a <平台>]`：编译前从镜像仓库拉取编译环境镜像（docker pull，仓库前缀
-    `FMC_IMAGE_REGISTRY`，默认 `harbor.localserver.com:9080/filemanage`，拉取后重打
-    本地名 `filemanage-client-build:<平台标签>`）；裸 `-n` 拉完即退出，配 `-a` 继续编译
-    （CI 常用 `./build.sh -n -a all -V v<版本>`）。
+  - `-n [-a <平台>]`：编译前从镜像仓库拉取编译环境镜像（docker pull，镜像全名自带
+    harbor 前缀 `harbor.localserver.com:9080/filemanage`，与 filemanageServer 编译
+    镜像同仓库惯例，拉取名即运行名、无本地重打步骤）；裸 `-n` 拉完即退出，配 `-a`
+    继续编译（CI 常用 `./build.sh -n -a all`，有 tag 时再带 `-V v<版本>`）。
   - `-V <版本号>`：显式指定产物版本号（去 v 前缀，覆盖 package.json）——经
     `BUILD_VERSION` 环境变量传入容器，仅影响产物命名与经 `tauri --config` 注入的
     bundle 版本元数据，**不改动** package.json/Cargo.toml/tauri.conf.json 三处源文件。
-- `container-build.sh` 支持 `BUILD_VERSION` 环境变量（空=沿用 package.json，原行为），
-  版本覆盖与既有 deb 依赖覆盖合并为单次 `--config` 深合并注入。
+    tauri 的 version 字段要求严格 semver：非 semver 值告警并回落 package.json，不中断
+    编译（Jenkins build #1 实测：无 tag 时 `git describe` 兜底出的 `unknown` 被注入，
+    四平台全挂 `must be a semver string`——Client 版本源是 package.json，CI 无
+    tag/显式参数时应**留空 `-V`**，流水线不得以 git describe 兜底值充当版本号）。
+- `container-build.sh` 支持 `BUILD_VERSION` 环境变量（空=沿用 package.json，原行为；
+  非 semver 值告警回落），版本覆盖与既有 deb 依赖覆盖合并为单次 `--config` 深合并注入。
 
 ## [0.1.0] - 2026-09-22（首个基线版，需求31；双库全功能回归通过后定版）
 

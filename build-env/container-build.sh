@@ -16,6 +16,9 @@
 #   -V 传入，CI 固定版本用）——同时经 --config "version" 注入 tauri bundle 版本
 #   元数据，产物命名与包内版本一致；不改动 package.json/Cargo.toml/
 #   tauri.conf.json 源文件。空 = 沿用 package.json（原行为）。
+#   ⚠️ tauri 的 version 字段要求严格 semver（Jenkins build #1 实测：注入
+#   git describe 兜底出的 "unknown" 报 `must be a semver string` 四平台全挂）——
+#   非 semver 值告警并回落 package.json，不中断编译。
 #
 # 流程：/src 工程 rsync 到 /work（持久卷，src-tauri/target 等排除项增量复用）
 #      → npm ci → tauri build → 产物按 工程名_平台_版本号.扩展名 规范复制回
@@ -43,6 +46,13 @@ cd /work
 
 PKG_VERSION="$(node -p "require('./package.json').version")"
 BUILD_VERSION="${BUILD_VERSION:-}"
+# tauri "version" 字段要求严格 semver：非 semver 的 BUILD_VERSION（如 CI 无 tag 时
+# git describe 兜底出的 "unknown"）不可注入，告警回落 package.json（不中断编译）
+SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+if [[ -n "$BUILD_VERSION" && ! "$BUILD_VERSION" =~ $SEMVER_RE ]]; then
+    echo "!! 警告: BUILD_VERSION '$BUILD_VERSION' 非合法 semver（tauri version 要求），回落 package.json 版本"
+    BUILD_VERSION=""
+fi
 VERSION="${BUILD_VERSION:-$PKG_VERSION}"
 if [[ -n "$BUILD_VERSION" ]]; then
     echo "==> 产物版本: $VERSION（宿主 -V 显式指定；package.json 为 $PKG_VERSION，源文件不改）"

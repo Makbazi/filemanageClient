@@ -2,7 +2,9 @@
 
 ## 环境矩阵与命名规范
 
-Dockerfile 命名 `Dockerfile.<平台标签>`，镜像命名 `filemanage-client-build:<平台标签>`：
+Dockerfile 命名 `Dockerfile.<平台标签>`，镜像命名
+`harbor.localserver.com:9080/filemanage/filemanage-client-build:<平台标签>`
+（与 filemanageServer 编译镜像同仓库；构建/拉取/运行一律用此全名，拉取名即运行名）：
 
 | 平台标签（= 镜像 tag = `-a` 值） | Dockerfile | 基础镜像 | 产物 |
 |---|---|---|---|
@@ -48,13 +50,14 @@ Windows 10+（微软官方策略），即 Tauri 2 的 Windows 产物天然最低
 - `-d`：`debug` | `release`（默认 release）；产物文件名保持
   `filemanageClient_<平台>_<版本号>.<扩展名>` 规范，debug 仅目录不同（`release/debug/`）
 - `-i`：构建编译环境镜像（缺失时 `-a` 编译亦会自动构建；改 Dockerfile 后强制重建用 `-f`）
-- `-n`：编译前拉取编译环境镜像——仓库前缀 `FMC_IMAGE_REGISTRY`（默认
-  `harbor.localserver.com:9080/filemanage`，对齐 filemanageServer 编译镜像仓库惯例），
-  拉取后重打为本地名 `filemanage-client-build:<平台标签>`；裸 `-n` 拉完即退出，配
+- `-n`：编译前拉取编译环境镜像（镜像名自带 harbor 仓库前缀，与 filemanageServer
+  编译镜像同仓库惯例；拉取名即运行名，无本地重打步骤）；裸 `-n` 拉完即退出，配
   `-a` 继续编译
 - `-V <版本号>`：显式指定产物版本号（去 v 前缀，覆盖 package.json；仅影响产物命名与
   经 `tauri --config` 注入的 bundle 版本元数据，不改动
-  package.json/Cargo.toml/tauri.conf.json 三处源文件）
+  package.json/Cargo.toml/tauri.conf.json 三处源文件）。tauri 要求严格 semver：
+  非 semver 值（如 CI 无 tag 时 git describe 兜底出的 `unknown`）告警并回落
+  package.json，不中断编译——CI 只在有明确 tag/参数时传 `-V`
 - 版本号优先级：`-V` 指定值 > package.json；扩展名：`.deb` / `.rpm` / `.AppImage` / `.exe`
 
 ## 构建机制

@@ -61,11 +61,13 @@ cd src-tauri && cargo check
                                #（Ubuntu 20.04 环境因 Tauri2 缺 webkit2gtk-4.1 不可行，已移除）
 ./build.sh -i [-a <平台>]      # 仅构建编译环境镜像（docker build，-a 限定对应环境、缺省四环境全建），
                                # 完成后退出，不编译工程
-./build.sh -n [-a <平台>]      # 编译前拉取编译环境镜像（docker pull <FMC_IMAGE_REGISTRY>/
-                               # filemanage-client-build:<标签>，默认 harbor.localserver.com:9080/filemanage，
-                               # 拉取后重打本地名）；裸 -n 拉完即退出，配 -a 继续编译（CI：-n -a all -V v0.2.0）
+./build.sh -n [-a <平台>]      # 编译前拉取编译环境镜像（docker pull，镜像全名自带 harbor 前缀
+                               # harbor.localserver.com:9080/filemanage，拉取名即运行名）；
+                               # 裸 -n 拉完即退出，配 -a 继续编译（CI：-n -a all [-V v0.2.0]）
 ./build.sh -a all -V v0.2.0    # -V 显式指定产物版本号（覆盖 package.json，去 v 前缀；仅影响产物命名与
-                               # tauri --config 注入的 bundle 版本元数据，不改三处版本源文件）
+                               # tauri --config 注入的 bundle 版本元数据，不改三处版本源文件；
+                               # tauri 要求严格 semver——非 semver 值（如 git describe 兜底 unknown）
+                               # 容器内告警回落 package.json，不中断编译）
 ```
 
 ## 关键约定（改动前必读）
