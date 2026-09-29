@@ -1,0 +1,54 @@
+# =============================================================================
+# filemanageClient 编译环境：Ubuntu 22.04（deb + rpm + AppImage 全量 Linux 产物）
+#
+# 镜像命名规范：filemanage-client-build:<平台标签>，本平台标签 = ubuntu22.04
+# 产物：deb / rpm / AppImage（Tauri 2 bundle）
+# 注意：Ubuntu 20.04 环境因官方源缺 libwebkit2gtk-4.1-dev（Tauri 2 硬依赖，
+#   glibc/libsoup3 亦无法满足）而移除，详见 build-env/README.md。
+#
+# 构建（在工程根目录）：
+#   docker build -f build-env/Dockerfile.ubuntu22.04 -t filemanage-client-build:ubuntu22.04 build-env
+# 使用（通常经 ./build.sh 调用）：
+#   docker run --rm -v $PWD:/src -v fmc-work-ubuntu22.04:/work -v fmc-cargo-ubuntu22.04:/opt/cargo \
+#     -v fmc-npm:/opt/npm -v fmc-cache:/root/.cache \
+#     filemanage-client-build:ubuntu22.04 bash /src/build-env/container-build.sh "deb,rpm,appimage" release "" ubuntu22.04
+# =============================================================================
+FROM ubuntu:22.04
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Tauri 2 Linux 系统依赖（官方清单）+ rpm 打包工具 + 基础工具
+# 注：libwebkit2gtk-4.1-dev 拉取 libsoup-3.0 全套依赖（显式列出便于审计）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget xz-utils git rsync file \
+        build-essential pkg-config patchelf \
+        libssl-dev libxdo-dev librsvg2-dev libayatana-appindicator3-dev \
+        libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev \
+        rpm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node（官方 tarball，版本可控、不依赖发行版源对最新 Ubuntu 的支持速度）
+ARG NODE_VERSION=22.20.0
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.txz \
+    && tar -xJ --strip-components=1 -C /usr/local -f /tmp/node.txz && rm -f /tmp/node.txz \
+    && node --version && npm --version
+
+# Rust（rustup minimal；工具链与镜像绑定，registry/git 缓存在运行期卷 /opt/cargo）
+ARG RUST_TOOLCHAIN=stable
+RUN export CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/opt/rustup && \
+        curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+    && /usr/local/cargo/bin/rustc --version
+
+# AppImage 打包依赖：linuxdeploy 的 gtk 插件运行期调用 xdg-open（缺失则 bundle 失败）
+RUN apt-get update && apt-get install -y --no-install-recommends xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# 运行期约定：/src 挂载工程、/work 挂载构建工作区、/opt/cargo|/opt/npm|/root/.cache 为缓存卷
+ENV CARGO_HOME=/opt/cargo \
+    RUSTUP_HOME=/opt/rustup \
+    NPM_CONFIG_CACHE=/opt/npm \
+    PATH=/usr/local/cargo/bin:/opt/cargo/bin:/usr/local/bin:${PATH}
+RUN mkdir -p /opt/cargo /opt/npm /work /src
+
+WORKDIR /src
+ENTRYPOINT []
+CMD ["sleep", "infinity"]
