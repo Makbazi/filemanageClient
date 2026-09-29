@@ -26,9 +26,6 @@
 # =============================================================================
 set -euo pipefail
 
-echo "set PROXY"
-export HTTP_PROXY=http://192.168.1.71:7890/
-export HTTPS_PROXY=http://192.168.1.71:7890/
 BUNDLES="${1:?用法: container-build.sh <bundles> <debug|release> [triple] [deb平台标签] [deb依赖覆盖JSON]}"
 MODE="${2:?缺少第二参数 debug|release}"
 TRIPLE="${3:-}"
