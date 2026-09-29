@@ -16,8 +16,11 @@ npm install
 # 开发运行（需要 Rust 工具链 + Tauri 2 系统依赖，见 https://tauri.app/start/）
 npm run tauri dev
 
-# 构建桌面应用
+# 构建桌面应用（本机快速验证）
 npm run tauri build
+
+# 多平台发行产物（Docker 编译环境：deb/rpm/AppImage/Win10 NSIS，见 build-env/README.md）
+./build.sh -a all -d release      # → release/（-d debug → release/debug/）
 
 # 仅前端类型检查/构建
 npm run build

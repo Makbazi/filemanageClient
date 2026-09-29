@@ -53,6 +53,19 @@ npm install
 npm run tauri dev        # 开发运行（GUI）
 npm run build            # tsc + vite（类型检查）
 cd src-tauri && cargo check
+
+./build.sh -a all -d release   # 多平台产物（Docker 编译环境，见 build-env/README.md）：
+                               # ubuntu22.04(deb+rpm+AppImage)/24.04(deb)/26.04(deb)/
+                               # windows10(NSIS exe，最低 Win10)；-d debug → release/debug/
+                               # 产物命名 filemanageClient_<平台>_<版本号>.<扩展名>
+                               #（Ubuntu 20.04 环境因 Tauri2 缺 webkit2gtk-4.1 不可行，已移除）
+./build.sh -i [-a <平台>]      # 仅构建编译环境镜像（docker build，-a 限定对应环境、缺省四环境全建），
+                               # 完成后退出，不编译工程
+./build.sh -n [-a <平台>]      # 编译前拉取编译环境镜像（docker pull <FMC_IMAGE_REGISTRY>/
+                               # filemanage-client-build:<标签>，默认 harbor.localserver.com:9080/filemanage，
+                               # 拉取后重打本地名）；裸 -n 拉完即退出，配 -a 继续编译（CI：-n -a all -V v0.2.0）
+./build.sh -a all -V v0.2.0    # -V 显式指定产物版本号（覆盖 package.json，去 v 前缀；仅影响产物命名与
+                               # tauri --config 注入的 bundle 版本元数据，不改三处版本源文件）
 ```
 
 ## 关键约定（改动前必读）

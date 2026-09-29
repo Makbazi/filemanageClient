@@ -1,0 +1,50 @@
+# =============================================================================
+# filemanageClient 编译环境：Ubuntu 22.04 Windows 交叉编译（最低 Windows 10）
+#
+# 镜像命名规范：filemanage-client-build:<平台标签>，本平台标签 = ubuntu22.04-win10
+# 产物：NSIS 安装包 exe（filemanageClient_windows10_<版本号>.exe）
+#
+# 交叉方案：rust 目标 x86_64-pc-windows-gnu + mingw-w64 + tauri bundler NSIS
+#   （makensis 在 Linux 上打安装包）。目标平台不依赖 GTK/webkit，装包远小于 Linux 环境。
+# "最低 Windows 10" 依据：Tauri 2 依赖 WebView2 Evergreen 运行时（2023 年起仅支持
+#   Win10+），产物天然最低 Win10；命名与文档落实（见 build-env/README.md）。
+# TLS：reqwest native-tls 在 windows 目标走 schannel，无需 openssl。
+#
+# 构建（在工程根目录）：
+#   docker build -f build-env/Dockerfile.ubuntu22.04-win10 -t filemanage-client-build:ubuntu22.04-win10 build-env
+# 使用（通常经 ./build.sh 调用）：
+#   docker run --rm -v $PWD:/src -v fmc-work-ubuntu22.04-win10:/work \
+#     -v fmc-cargo-ubuntu22.04-win10:/opt/cargo -v fmc-npm:/opt/npm -v fmc-cache:/root/.cache \
+#     filemanage-client-build:ubuntu22.04-win10 bash /src/build-env/container-build.sh "nsis" release x86_64-pc-windows-gnu ubuntu22.04
+# =============================================================================
+FROM ubuntu:22.04
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget xz-utils git rsync file \
+        build-essential pkg-config patchelf \
+        mingw-w64 nsis \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG NODE_VERSION=22.20.0
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.txz \
+    && tar -xJ --strip-components=1 -C /usr/local -f /tmp/node.txz && rm -f /tmp/node.txz \
+    && node --version && npm --version
+
+ARG RUST_TOOLCHAIN=stable
+RUN export CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/opt/rustup && \
+        curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+    && /usr/local/cargo/bin/rustc --version
+# Windows GNU 交叉目标 std（mingw 链接所需 dlltool/ld/gcc 由 mingw-w64 提供）
+RUN CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/opt/rustup /usr/local/cargo/bin/rustup target add x86_64-pc-windows-gnu \
+    && x86_64-w64-mingw32-gcc --version | head -1 && makensis -VERSION
+
+ENV CARGO_HOME=/opt/cargo \
+    RUSTUP_HOME=/opt/rustup \
+    NPM_CONFIG_CACHE=/opt/npm \
+    PATH=/usr/local/cargo/bin:/opt/cargo/bin:/usr/local/bin:${PATH}
+RUN mkdir -p /opt/cargo /opt/npm /work /src
+
+WORKDIR /src
+ENTRYPOINT []
+CMD ["sleep", "infinity"]

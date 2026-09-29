@@ -15,6 +15,34 @@
 
 ## 未发布版本
 
+### 构建体系（2026-09-27，无版本号变更/无协议影响）
+- 新增 `build-env/` 多平台 Docker 编译环境（命名规范 `Dockerfile.<平台标签>` /
+  镜像 `filemanage-client-build:<平台标签>`）：ubuntu22.04（deb+rpm+AppImage）、
+  ubuntu24.04（deb）、ubuntu26.04（deb）、ubuntu22.04-win10（Windows NSIS 交叉，
+  x86_64-pc-windows-gnu + makensis，最低 Windows 10——WebView2 Evergreen 天然门槛，
+  以命名+文档落实）。
+- 新增 `./build.sh -a <ubuntu22.04|ubuntu24.04|ubuntu26.04|windows10|rpm|appimage|all>
+  -d <debug|release>`（默认 release）：产物命名
+  `filemanageClient_<平台>_<版本号>.<扩展名>` → `release/`（debug →
+  `release/debug/`）；容器内 rsync 隔离工作区（宿主工作树零污染、增量编译缓存卷）。
+- **Ubuntu 20.04 环境未交付**：Tauri 2 硬依赖 `libwebkit2gtk-4.1-dev`，20.04 官方源
+  无此包（libsoup3/glibc 基线亦不满足，实测），官方最低支持 22.04——记录于
+  `build-env/README.md`。
+
+### 构建体系（2026-09-29，无版本号变更/无协议影响）
+- `build.sh` 新增 `-i` / `-n` / `-V` 参数（对齐 filemanageServer/build.sh 同名参数）：
+  - `-i [-a <平台>]`：仅构建编译环境镜像（docker build）后退出，不编译工程；`-a`
+    限定对应环境镜像，缺省四环境全建。
+  - `-n [-a <平台>]`：编译前从镜像仓库拉取编译环境镜像（docker pull，仓库前缀
+    `FMC_IMAGE_REGISTRY`，默认 `harbor.localserver.com:9080/filemanage`，拉取后重打
+    本地名 `filemanage-client-build:<平台标签>`）；裸 `-n` 拉完即退出，配 `-a` 继续编译
+    （CI 常用 `./build.sh -n -a all -V v<版本>`）。
+  - `-V <版本号>`：显式指定产物版本号（去 v 前缀，覆盖 package.json）——经
+    `BUILD_VERSION` 环境变量传入容器，仅影响产物命名与经 `tauri --config` 注入的
+    bundle 版本元数据，**不改动** package.json/Cargo.toml/tauri.conf.json 三处源文件。
+- `container-build.sh` 支持 `BUILD_VERSION` 环境变量（空=沿用 package.json，原行为），
+  版本覆盖与既有 deb 依赖覆盖合并为单次 `--config` 深合并注入。
+
 ## [0.1.0] - 2026-09-22（首个基线版，需求31；双库全功能回归通过后定版）
 
 ### 新增
