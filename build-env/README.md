@@ -90,6 +90,13 @@ xdg-open 缺失类依赖报错已在本套镜像内置修复）。**直接重跑
 cargo/npm/tauri 缓存均在命名卷中，重试只做增量（实测 windows10 环境一次重试即通过）。
 持续失败时可在 `container-build.sh` 前注入 GitHub 代理或预置 `~/.cache/tauri` 卷内容。
 
+**首次冷缓存全量构建很慢（CI 超时主要来源，Jenkins build #2 实测）**：四环境各自
+独立 `fmc-work-*`/`fmc-cargo-*` 卷，首跑每个环境都要付 crates.io 索引+全依赖下载
+与 tauri/gtk 依赖树 release 全编译（实测单环境 30–40 分钟起，网络差时索引更新伴随
+大量 spurious retry）；四环境串行首次全量可远超 3 小时。缓存在 dind 命名卷内
+（Jenkins k8s cloud 场景：dind `/var/lib/docker` 挂 hostPath，卷随宿主持久、跨 pod
+存活），预热后整轮增量约 10–20 分钟。CI 首跑请放宽 timeout 或先手动触发一次预热构建。
+
 ## 安装验证速查
 
 ```bash
