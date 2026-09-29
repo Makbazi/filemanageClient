@@ -19,6 +19,8 @@
 #   ⚠️ tauri 的 version 字段要求严格 semver（Jenkins build #1 实测：注入
 #   git describe 兜底出的 "unknown" 报 `must be a semver string` 四平台全挂）——
 #   非 semver 值告警并回落 package.json，不中断编译。
+#   TAURI_BUNDLER_TOOLS_GITHUB_MIRROR[_TEMPLATE] / HTTP(S)_PROXY 由宿主 build.sh
+#   按需透传（GitHub 工具链下载加速，见 README"已知网络注意事项"），本脚本不处理。
 #
 # 流程：/src 工程 rsync 到 /work（持久卷，src-tauri/target 等排除项增量复用）
 #      → npm ci → tauri build → 产物按 工程名_平台_版本号.扩展名 规范复制回

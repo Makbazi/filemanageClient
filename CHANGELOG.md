@@ -46,6 +46,14 @@
     tag/显式参数时应**留空 `-V`**，流水线不得以 git describe 兜底值充当版本号）。
 - `container-build.sh` 支持 `BUILD_VERSION` 环境变量（空=沿用 package.json，原行为；
   非 semver 值告警回落），版本覆盖与既有 deb 依赖覆盖合并为单次 `--config` 深合并注入。
+- **GitHub 工具链下载加速透传**（Jenkins build #2/#3 实测卡在 AppImage 的 AppRun
+  GitHub 下载直至超时）：宿主设置 `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR`（gh-proxy 类，
+  改写后 URL=基址+完整原 URL）/ `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR_TEMPLATE`
+  （`<owner>/<repo>/<version>/<asset>` 模板式，优先）/ `HTTP(S)_PROXY`（无 mirror 时
+  bundler 走系统代理）任一，`build.sh` 自动按需透传进容器（tauri-cli 官方 env，
+  实测 @tauri-apps/cli 2.11.4 的 releases 类工具下载生效；raw.githubusercontent 的
+  插件脚本仅认代理）。下载件缓存于共享卷 `fmc-cache`，配好镜像后任一环境成功一次
+  即四环境及后续构建全复用。
 
 ## [0.1.0] - 2026-09-22（首个基线版，需求31；双库全功能回归通过后定版）
 

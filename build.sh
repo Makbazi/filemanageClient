@@ -27,6 +27,16 @@
 #         裸 -n 拉完即退出，同时给 -a 则继续编译（CI 常用 ./build.sh -n -a all）
 #     -f  强制重建编译环境镜像（修改 build-env/Dockerfile.* 后需要；
 #         随 -a 编译流程执行，重建后继续编译）
+#     GitHub 工具链加速（AppImage 的 AppRun/linuxdeploy、NSIS 等打包需从 GitHub
+#     下载工具）：宿主设置以下任一环境变量即透传进容器——
+#         TAURI_BUNDLER_TOOLS_GITHUB_MIRROR         tauri 官方镜像基址（结果 =
+#             基址 + 完整原 URL 作 path，适配 gh-proxy 类镜像，如
+#             https://gh-proxy.com → .../https://github.com/owner/repo/...）
+#         TAURI_BUNDLER_TOOLS_GITHUB_MIRROR_TEMPLATE 模板式镜像（占位符
+#             <owner>/<repo>/<version>/<asset>，适配保留 releases 路径的镜像）
+#         HTTP(S)_PROXY / http(s)_proxy              无镜像时走代理
+#     下载件缓存在共享卷 fmc-cache（跨四环境、随 dind hostPath 持久），
+#     镜像可达时任一环境成功下载一次即全网复用。详见 build-env/README.md
 #     -V <版本号>  显式指定产物版本号（覆盖 package.json，可带或不带 v 前缀，
 #         不加 -dirty）；仅影响产物命名与经 tauri --config 注入的 bundle 版本
 #         元数据，不改动 package.json/Cargo.toml/tauri.conf.json 三处源文件。
@@ -167,7 +177,18 @@ build_platform() {
     docker volume create fmc-npm >/dev/null
     docker volume create fmc-cache >/dev/null
 
-    echo "==> [$p] docker run $image  bundles=$BUNDLES mode=$MODE${TRIPLE:+ target=$TRIPLE}${BUILD_VERSION:+ version=$BUILD_VERSION}"
+    # GitHub 工具链下载加速：tauri bundler 官方镜像 env（MIRROR/MIRROR_TEMPLATE，
+    # tauri-cli ≥2.0.0-rc.13；设置后 releases 类下载改道镜像）与常规代理 env
+    # （未设镜像时 bundler try_proxy_from_env 生效）按需透传，空则不注入。
+    local -a net_env=() v
+    for v in TAURI_BUNDLER_TOOLS_GITHUB_MIRROR TAURI_BUNDLER_TOOLS_GITHUB_MIRROR_TEMPLATE \
+             HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy; do
+        [[ -n "${!v:-}" ]] && net_env+=(-e "$v=${!v}")
+    done
+
+    local net_msg=""
+    if (( ${#net_env[@]} )); then net_msg=" github加速env: $(( ${#net_env[@]} / 2 )) 项"; fi
+    echo "==> [$p] docker run $image  bundles=$BUNDLES mode=$MODE${TRIPLE:+ target=$TRIPLE}${BUILD_VERSION:+ version=$BUILD_VERSION}${net_msg}"
     docker run --rm \
         -v "$SCRIPT_DIR":/src \
         -v "fmc-work-${ENV_TAG}":/work \
@@ -176,6 +197,7 @@ build_platform() {
         -v fmc-cache:/root/.cache \
         -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
         -e BUILD_VERSION="$BUILD_VERSION" \
+        "${net_env[@]}" \
         "$image" bash /src/build-env/container-build.sh "$BUNDLES" "$MODE" "$TRIPLE" "$DEB_TOKEN" "$DEB_DEPS"
 }
 

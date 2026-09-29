@@ -84,11 +84,35 @@ noble/resolute 的 GTK3 运行时虽经 t64 迁移更名 `libgtk-3-0t64`，但�
 
 ## 已知网络注意事项
 
-AppImage（linuxdeploy 插件）与 NSIS（tauri-apps/binary-releases）打包时需要从
-GitHub 拉取工具链，网络抖动可能出现瞬时失败（如 `TLS close_notify` 连接重置、
-xdg-open 缺失类依赖报错已在本套镜像内置修复）。**直接重跑同一命令即可**——
-cargo/npm/tauri 缓存均在命名卷中，重试只做增量（实测 windows10 环境一次重试即通过）。
-持续失败时可在 `container-build.sh` 前注入 GitHub 代理或预置 `~/.cache/tauri` 卷内容。
+AppImage（AppRun/linuxdeploy 及其插件）与 NSIS 打包时需要从 GitHub 拉取工具链，
+网络抖动可能出现瞬时失败（如 `TLS close_notify` 连接重置、xdg-open 缺失类依赖报错
+已在本套镜像内置修复）。**直接重跑同一命令即可**——cargo/npm/tauri 缓存均在命名卷中，
+重试只做增量（实测 windows10 环境一次重试即通过）。
+
+**GitHub 太慢/长期拉不动时（Jenkins build #2/#3 实测卡在 AppRun 下载），宿主设置
+以下任一环境变量，`build.sh` 自动透传进容器**（tauri-cli ≥2.0.0-rc.13 原生支持，
+实测本仓库锁定的 @tauri-apps/cli 2.11.4 / tauri-bundler 2.9.4 生效）：
+
+| env | 语义 | 适用镜像类型 |
+|---|---|---|
+| `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR` | 改写后 URL = 基址 + **完整原 URL 作 path**（`https://m/https://github.com/o/r/releases/download/v/a`） | gh-proxy 类（如 `https://gh-proxy.com`） |
+| `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR_TEMPLATE` | 模板占位符 `<owner>/<repo>/<version>/<asset>`（优先于上者） | 保留 releases 路径结构的镜像 |
+| `HTTP(S)_PROXY` / `http(s)_proxy` | 上述两个 mirror env **未设置**时，bundler 走 `try_proxy_from_env` | 常规 HTTP 代理 |
+
+注意两点：① mirror env 只改写 `github.com/…/releases/download/…` 资产，
+`raw.githubusercontent.com` 上的两个 linuxdeploy 插件脚本（.sh，约十 KB）不走
+mirror、只认代理；② 下载件统一缓存在**共享卷 `fmc-cache`**（`/root/.cache`，
+四环境共用，Jenkins dind hostPath 下跨构建持久）——镜像配好后任一环境成功下载
+一次，其余环境/后续构建全部命中缓存。CI 配置示例（Jenkinsfile）：
+
+```groovy
+environment {
+  TAURI_BUNDLER_TOOLS_GITHUB_MIRROR = 'https://gh-proxy.com'   // 换作内网可达的镜像
+}
+```
+
+首次使用前可在构建容器内验证可达性：
+`curl -skIL https://gh-proxy.com/https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64`。
 
 **首次冷缓存全量构建很慢（CI 超时主要来源，Jenkins build #2 实测）**：四环境各自
 独立 `fmc-work-*`/`fmc-cargo-*` 卷，首跑每个环境都要付 crates.io 索引+全依赖下载
