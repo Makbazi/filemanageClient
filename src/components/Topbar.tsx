@@ -25,6 +25,7 @@ const TITLES: Record<View, string> = {
   transfers: "传输",
   ai: "AI 助手",
   search: "搜索",
+  settings: "设置",
 };
 
 export default function Topbar(p: Props) {

@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { IconAlert, IconX } from "./icons";
 
 export function Modal(props: {
@@ -13,7 +14,13 @@ export function Modal(props: {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, [props]);
-  return (
+  // 0.1.4 层级修复（需求1，Windows"添加服务端"被设置卡片遮挡）：对话框统一 portal 到
+  // body——嵌套对话框（如分享/版本历史内的确认框、设置页内的服务端表单）不再被困在父
+  // .modal-mask 内：父遮罩的 backdrop-filter 会为 fixed 后代建立包含块+层叠上下文，
+  // 叠加 .modal-body 的 overflow 裁剪，WebView2 下子对话框即被压在父卡片之下。
+  // React 树位置不变（state/事件不受影响），仅 DOM 挂点变为 body 直接子节点，
+  // 挂载顺序=显示顺序，后开的对话框恒在先开的之上。
+  return createPortal(
     <div className="modal-mask" onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
       <div className="modal" style={{ maxWidth: props.width ?? 480 }}>
         <div className="modal-head">
@@ -27,7 +34,8 @@ export function Modal(props: {
         </div>
         <div className="modal-body">{props.children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
