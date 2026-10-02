@@ -2,8 +2,12 @@
 // 0.1.4（需求2）：由浮动模态卡片改为**主区整页视图**（view === "settings"，复用 .page 容器），
 // 左侧导航栏保持可见与可折叠；页内"添加/编辑服务端"表单与明文 http 确认仍为对话框
 // （Modals 遮罩已 portal 到 body，恒浮于本页之上）。
+// 0.1.5：新增"关于"页签（版本信息：应用名/客户端版本/Tauri 版本/配套服务端版本），
+// 页头右侧同时常驻显示版本号——版本一律取 Tauri 运行时元数据（非 import 常量），
+// 因此与 build.sh -V 注入的产物版本一致（该通道不改三处版本源文件）。
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getName, getTauriVersion, getVersion } from "@tauri-apps/api/app";
 import type { AIProvider, AppConfig, RootConf, ServerConf, ServerRoot } from "../lib/types";
 import { uid } from "../lib/types";
 import { active, credForget, fetchRoots, serverCall, serverChangePassword, serverLogout } from "../lib/api";
@@ -20,7 +24,14 @@ interface Props {
   onLogin(serverId: string): void;
 }
 
-type Tab = "local" | "servers" | "appearance" | "transfer" | "ai" | "account";
+type Tab = "local" | "servers" | "appearance" | "transfer" | "ai" | "account" | "about";
+
+/** 运行时版本元数据（Tauri app 命令取得；非 Tauri 环境/取用失败时为空串，UI 自行回落） */
+interface AppInfo {
+  name: string;
+  version: string;
+  tauri: string;
+}
 
 export default function Settings(p: Props) {
   const [tab, setTab] = useState<Tab>(p.initialTab ?? "local");
@@ -36,6 +47,25 @@ export default function Settings(p: Props) {
   const [srvForm, setSrvForm] = useState<{ idx: number; conf: ServerConf } | null>(null);
   // 明文 http 保存前的二次确认（0.4.0 安全升级）
   const [httpWarn, setHttpWarn] = useState<ServerConf | null>(null);
+  const [info, setInfo] = useState<AppInfo>({ name: "FileManage", version: "", tauri: "" });
+
+  // 版本信息：走 Tauri app 命令（core:app:default 已含 allow-version/allow-name/
+  // allow-tauri-version，无需扩权限），故 -V 覆盖产物版本时这里同步变化；
+  // 纯浏览器预览（非 Tauri 运行时）invoke 失败 → 保留默认名、版本留空由 UI 显示"未知"。
+  useEffect(() => {
+    let cancelled = false;
+    const safe = <T,>(p: Promise<T>, d: T) => p.catch(() => d);
+    void Promise.all([
+      safe(getName(), "FileManage"),
+      safe(getVersion(), ""),
+      safe(getTauriVersion(), ""),
+    ]).then(([name, version, tauri]) => {
+      if (!cancelled) setInfo({ name, version, tauri });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 需求8：外部登录态/凭证变化（fm-config-changed → App cfg → props）同步进内部状态；
   // 编辑中的表单草稿在 srvForm/httpWarn 独立 state，不会被此同步打断。
@@ -139,7 +169,11 @@ export default function Settings(p: Props) {
       <div className="page-head">
         <div>
           <h2>设置</h2>
-          <p className="dim">本地目录、服务端、外观、传输、AI 能力与账户配置。</p>
+          <p className="dim">本地目录、服务端、外观、传输、AI 能力、账户与版本信息。</p>
+        </div>
+        <div className="settings-ver">
+          <span className="dim">版本</span>
+          <span className="ver">{info.version ? `v${info.version}` : "未知"}</span>
         </div>
       </div>
       <div className="tabs">
@@ -151,6 +185,7 @@ export default function Settings(p: Props) {
             ["transfer", "传输"],
             ["ai", "AI 能力"],
             ["account", "账户"],
+            ["about", "关于"],
           ] as [Tab, string][]
         ).map(([k, label]) => (
           <button key={k} className={tab === k ? "tab active" : "tab"} onClick={() => setTab(k)}>
@@ -371,6 +406,7 @@ export default function Settings(p: Props) {
       )}
 
       {tab === "account" && <AccountTab cfg={cfg} onLogin={p.onLogin} />}
+      {tab === "about" && <AboutTab info={info} />}
       </div>
 
       {httpWarn && (
@@ -622,6 +658,37 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
       <p className="dim tip">
         账户会话最长保留 3 周（活跃自动续期）。用户创建、目录分配与权限管理均在服务端独立端口的
         管理台完成，客户端不提供用户管理服务。
+      </p>
+    </div>
+  );
+}
+
+// ---------- 关于（0.1.5）：版本信息 ----------
+// 客户端版本/Tauri 版本取自运行时 app 命令（与安装包注入版本一致，非编译期常量）；
+// 配套服务端版本为兼容矩阵事实，随 CHANGELOG 一起维护，改矩阵时同步这里的文案。
+function AboutTab(p: { info: AppInfo }) {
+  const ver = p.info.version ? `v${p.info.version}` : "未知";
+  return (
+    <div className="tab-body">
+      <div className="about-hero">
+        <div className="about-name">{p.info.name}</div>
+        <div className="about-ver">{ver}</div>
+        <div className="dim">Tauri 2 桌面客户端 · 本地目录 / 服务端双数据源</div>
+      </div>
+      <div className="list-row">
+        <span className="dim">客户端版本</span>
+        <span className="about-val">{ver}</span>
+      </div>
+      <div className="list-row">
+        <span className="dim">Tauri 框架版本</span>
+        <span className="about-val">{p.info.tauri ? `v${p.info.tauri}` : "未知"}</span>
+      </div>
+      <div className="list-row">
+        <span className="dim">配套服务端</span>
+        <span className="about-val">0.1.x（推荐，当前 0.1.1）· 0.7.x / 0.6.x / 0.5.x 可用</span>
+      </div>
+      <p className="dim tip">
+        版本号读自安装包自身元数据：构建脚本以 -V 指定产物版本时，这里显示的就是该注入值（不改动工程版本源文件）。
       </p>
     </div>
   );
