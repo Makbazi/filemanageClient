@@ -66,9 +66,12 @@ Windows 10+（微软官方策略），即 Tauri 2 的 Windows 产物天然最低
   （`fmc-work-<标签>` 工作区/增量编译、`fmc-cargo-<标签>` crate 下载、共享
   `fmc-npm`、`fmc-cache`——linuxdeploy 等下载件），单平台失败不影响其余、末尾汇总
 - `container-build.sh`（容器内）：`/src` rsync → `/work`（排除 node_modules/dist/
-  release/.git/target，宿主工作树零污染、target 目录跨次增量）→ `npm ci` →
+  release/.git/target，宿主工作树零污染、target 目录跨次增量）→ **清空本 profile 的
+  `target/.../bundle/` 遗留产物**（tauri-bundler 安装包按"产品名_版本号"命名落在
+  bundle/<type>/ 根、只清自己的暂存子目录；/work 卷跨构建持久会积累旧版本包，收集时
+  可能静默取到旧包冠名新版本——症状即"产物版本对、界面是旧的"）→ `npm ci` →
   `npm run tauri -- build [--debug] --bundles <列表> [--target x86_64-pc-windows-gnu]`
-  → 产物按规范名复制回 `/src/release[debug]/`
+  → 产物按规范名（收集按 mtime 取最新，纵深防御）复制回 `/src/release[debug]/`
 - Windows 交叉采用 `x86_64-pc-windows-gnu`（mingw-w64 + NSIS makensis，Linux 侧
   即可打安装包）；若该目标在依赖升级后出现链接问题，回退方案为同基础镜像改用
   cargo-xwin + MSVC 目标（产物命名不变）
