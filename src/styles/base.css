@@ -1156,6 +1156,17 @@ input[type="radio"] {
 }
 
 /* ---------- 设置页 ---------- */
+/* 0.1.4（需求2）：设置由浮动模态卡片改为主区整页视图（复用 .page 容器，左侧导航
+   保持可见/可折叠），内容列居中限宽。页内子对话框（添加/编辑服务端、http 确认）
+   经 Modals 的 createPortal 挂 body，恒浮于本页之上。 */
+.settings-inner {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 .tabs {
   display: flex;
   gap: 4px;
@@ -1424,16 +1435,20 @@ input[type="radio"] {
 }
 
 /* ---------- 可折叠侧栏（0.4.0，总结4：默认收成左缘小箭头标签） ---------- */
+/* 0.1.4：折叠标签贴窗口左上角（原整列拉伸、箭头垂直居中，设置页下不易注意） */
 .sidebar-tab {
-  width: 16px;
-  min-width: 16px;
-  align-self: stretch;
+  width: 18px;
+  min-width: 18px;
+  align-self: flex-start;
+  height: 52px;
+  margin-top: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: none;
-  border-right: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-left: none;
+  border-radius: 0 10px 10px 0;
   background: var(--sidebar-bg);
   color: var(--text-dim);
   cursor: pointer;
@@ -1442,8 +1457,9 @@ input[type="radio"] {
   background: var(--hover-2);
   color: var(--text);
 }
+/* 0.1.4：展开态折叠按钮移至导航栏左上角（brand 行首位，与折叠态标签同角） */
 .brand-collapse {
-  margin-left: auto;
+  flex: none;
   width: 28px;
   height: 28px;
 }

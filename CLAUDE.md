@@ -29,6 +29,9 @@ src/lib/
 src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView TransfersView
                        AIView PreviewModal ShareDialog AclDialog VersionsDialog TransferPanel
                        ContextMenu UploadToDialog Settings Modals icons
+                       （0.1.4：Settings 为主区整页视图（View 含 settings，侧栏保持
+                       可见；折叠按钮在左上角）；Modals 的遮罩经 createPortal 挂
+                       body，嵌套对话框恒在上）
                        （TransfersView：任务注册表管理页，侧栏"传输"入口带未完成任务角标，
                        全部/上传/下载筛选；ContextMenu/UploadToDialog：本地文件右键上传到
                        一个/多个远程（0.6.0 需求7））
@@ -116,7 +119,8 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.1.3（0.1.1/0.1.2 为构建体系批次）；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+0.1.4（0.1.1/0.1.2 为构建体系批次）；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+**0.1.4（2026-10-02 UI 修复/改版，数据协议零变更）**：修复 Windows 下设置页内"添加服务端"子对话框被设置卡片遮挡看不见的问题（需求1）——根因是嵌套 `Modal` 的遮罩渲染在父对话框 DOM 内，父 `.modal-mask` 的 `backdrop-filter` 为 fixed 后代建立包含块/层叠上下文、再被 `.modal-body` 的 `overflow` 裁剪；`Modals.tsx` 改为 `createPortal` 把遮罩统一挂到 `document.body`（所有对话框——含分享/版本历史内嵌确认框——一律正确分层，后开必在上）。同时设置界面由浮动模态卡片改为**主区整页视图并保持左侧导航**（需求2）：`View` 联合新增 `settings`，`<main>` 内渲染 `<Settings>`（复用 `.page`、内容居中限宽），Topbar 照常可见；Dialog 联合删除 `settings` 分支，App 以 `openSettings(tab?)`+`settingsTab` 统一进入（侧栏"设置/用户"、AIView、无本地目录回落、登录 `from:"settings"` 回跳账户页签均走它），Esc 离开回文件页，位置恢复不记录设置视图。侧栏折叠按钮移至**左上角**：展开态在 brand 行首位（原右侧），折叠态小标签贴窗口左上角（原整列垂直居中）。页签内容与保存链路不变。
 **0.1.3（2026-10-02 修复，数据协议零变更）**：服务端地址缺协议头归一——`baseUrl` 为裸
 `host:port` 时统一补 `http://`（`config.rs` `ServerConf::norm_base/normalized_base`，
 `AppState::load` 启动归一内存值、随下一次保存落盘；`serverapi.rs` 全部请求 URL 的唯一

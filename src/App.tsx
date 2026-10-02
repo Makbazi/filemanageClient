@@ -35,7 +35,7 @@ type Dialog =
   | { kind: "prompt"; title: string; label: string; initial: string; onOk(v: string): void }
   | { kind: "login"; serverId: string; from?: "settings" }
   | { kind: "uploadTo"; entry: FsEntry }
-  | { kind: "settings"; tab?: "account" }
+  // 0.1.4（需求2）：设置不再是对话框，并入视图体系（view === "settings"，主区整页视图）
   | { kind: "preview"; entry: FsEntry }
   | { kind: "share"; target: { path: string; isDir: boolean } }
   | { kind: "acl"; path: string }
@@ -163,6 +163,13 @@ export default function App() {
   // 已自动弹过登录框的服务端 id：后台加载遇 401 只对同一服务端弹一次，
   // 用户取消后不再反复弹出（显式操作/登录成功/登出时重置）。
   const loginPrompted = useRef("");
+  // 0.1.4（需求2）：设置为左侧导航保持可见的主区整页视图；侧栏"用户"与登录回跳
+  // 直达账户页签（以 key 侧重挂 Settings 使 initialTab 生效）。
+  const [settingsTab, setSettingsTab] = useState<"account" | null>(null);
+  const openSettings = (tab?: "account") => {
+    setSettingsTab(tab ?? null);
+    setView("settings");
+  };
 
   const notify = useCallback((msg: string) => {
     setToast(msg);
@@ -312,6 +319,8 @@ export default function App() {
   // 记录当前位置（防抖持久化，需求21）
   useEffect(() => {
     if (!cfg || !restored.current) return;
+    // 设置视图不记录位置：lastLocation 保持进入设置前的业务视图，避免下次启动恢复到设置页
+    if (view === "settings") return;
     const t = window.setTimeout(async () => {
       const c = api.getConfig();
       const next: AppConfig = {
@@ -347,7 +356,7 @@ export default function App() {
   function switchLocal() {
     const c = api.getConfig();
     if (!c.localRoots.length) {
-      setDialog({ kind: "settings" });
+      openSettings();
       return;
     }
     const last =
@@ -688,8 +697,8 @@ export default function App() {
           const a = api.active();
           await setActive({ ...a, rootId: id });
         }}
-        onOpenSettings={() => setDialog({ kind: "settings" })}
-        onOpenUsers={() => setDialog({ kind: "settings", tab: "account" })}
+        onOpenSettings={() => openSettings()}
+        onOpenUsers={() => openSettings("account")}
       />
 
       <main className="main">
@@ -825,9 +834,7 @@ export default function App() {
 
         {view === "transfers" && <TransfersView cfg={cfg} />}
 
-        {view === "ai" && (
-          <AIView cfg={cfg} onOpenSettings={() => setDialog({ kind: "settings" })} onJump={jumpTo} />
-        )}
+        {view === "ai" && <AIView cfg={cfg} onOpenSettings={() => openSettings()} onJump={jumpTo} />}
 
         {view === "search" && (
           <SearchView
@@ -836,6 +843,24 @@ export default function App() {
               setView("files");
               setPath(e.path);
             }}
+          />
+        )}
+
+        {/* 0.1.4（需求2）：设置为整页视图——左侧导航保持可见/可折叠，非浮动卡片 */}
+        {view === "settings" && (
+          <Settings
+            key={settingsTab ?? "open"}
+            cfg={cfg}
+            initialTab={settingsTab ?? undefined}
+            onClose={() => setView("files")}
+            onSave={async (next) => {
+              const saved = await api.saveConfig(next);
+              api.invalidateSource();
+              setCfg({ ...saved });
+              applyTheme(saved.ui.theme);
+              await refresh();
+            }}
+            onLogin={(id) => setDialog({ kind: "login", serverId: id, from: "settings" })}
           />
         )}
       </main>
@@ -866,10 +891,12 @@ export default function App() {
         <LoginModal
           serverId={dialog.serverId}
           cfg={cfg}
-          onClose={() =>
+          onClose={() => {
             // 从设置（账户/服务器页）打开的登录框：取消也回到账户页，不落主界面
-            setDialog(dialog.from === "settings" ? { kind: "settings", tab: "account" } : { kind: "none" })
-          }
+            const back = dialog.from === "settings";
+            setDialog({ kind: "none" });
+            if (back) openSettings("account");
+          }}
           onDone={async () => {
             loginPrompted.current = ""; // 登录成功：重置，未来会话失效仍可自动弹一次
             const c = await api.loadConfig();
@@ -878,7 +905,9 @@ export default function App() {
             const rs = await api.fetchRoots(dialog.serverId).catch(() => [] as ServerRoot[]);
             setRoots(rs);
             // 登录成功后回到账户页（0.6.1）：从设置打开的登录框不再落回主界面
-            setDialog(dialog.from === "settings" ? { kind: "settings", tab: "account" } : { kind: "none" });
+            const back = dialog.from === "settings";
+            setDialog({ kind: "none" });
+            if (back) openSettings("account");
             const cur = api.active();
             await setActive({
               kind: "server",
@@ -886,21 +915,6 @@ export default function App() {
               rootId: cur.kind === "server" && cur.serverId === dialog.serverId ? cur.rootId : rs?.[0]?.id ?? "",
             });
           }}
-        />
-      )}
-      {dialog.kind === "settings" && (
-        <Settings
-          cfg={cfg}
-          initialTab={dialog.tab}
-          onClose={() => setDialog({ kind: "none" })}
-          onSave={async (next) => {
-            const saved = await api.saveConfig(next);
-            api.invalidateSource();
-            setCfg({ ...saved });
-            applyTheme(saved.ui.theme);
-            await refresh();
-          }}
-          onLogin={(id) => setDialog({ kind: "login", serverId: id, from: "settings" })}
         />
       )}
       {dialog.kind === "preview" && (

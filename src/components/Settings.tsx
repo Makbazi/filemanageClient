@@ -1,4 +1,7 @@
 // 设置：本地目录 / 服务端 / 外观（主题、浏览风格、位置恢复）/ 传输（限速）/ AI 能力 / 用户管理。
+// 0.1.4（需求2）：由浮动模态卡片改为**主区整页视图**（view === "settings"，复用 .page 容器），
+// 左侧导航栏保持可见与可折叠；页内"添加/编辑服务端"表单与明文 http 确认仍为对话框
+// （Modals 遮罩已 portal 到 body，恒浮于本页之上）。
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AIProvider, AppConfig, RootConf, ServerConf, ServerRoot } from "../lib/types";
@@ -37,6 +40,16 @@ export default function Settings(p: Props) {
   // 需求8：外部登录态/凭证变化（fm-config-changed → App cfg → props）同步进内部状态；
   // 编辑中的表单草稿在 srvForm/httpWarn 独立 state，不会被此同步打断。
   useEffect(() => setCfg({ ...p.cfg }), [p.cfg]);
+
+  // Esc 离开设置视图回文件页；页内子对话框（服务端表单/明文 http 确认）打开时让位给
+  // 子对话框自己处理，避免一次 Esc 同时关掉两层（旧版两层 Modal 各挂 window 监听会连带关闭）。
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !srvForm && !httpWarn) p.onClose();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [srvForm, httpWarn, p]);
 
   async function persist(next: AppConfig) {
     setCfg(next);
@@ -121,7 +134,14 @@ export default function Settings(p: Props) {
     setCfg({ ...cfg, transfer: { ...cfg.transfer, ...patch } });
 
   return (
-    <Modal title="设置" onClose={p.onClose} width={680}>
+    <div className="page">
+      <div className="settings-inner">
+      <div className="page-head">
+        <div>
+          <h2>设置</h2>
+          <p className="dim">本地目录、服务端、外观、传输、AI 能力与账户配置。</p>
+        </div>
+      </div>
       <div className="tabs">
         {(
           [
@@ -351,6 +371,7 @@ export default function Settings(p: Props) {
       )}
 
       {tab === "account" && <AccountTab cfg={cfg} onLogin={p.onLogin} />}
+      </div>
 
       {httpWarn && (
         <Confirm
@@ -427,7 +448,7 @@ export default function Settings(p: Props) {
           </div>
         </Modal>
       )}
-    </Modal>
+    </div>
   );
 }
 

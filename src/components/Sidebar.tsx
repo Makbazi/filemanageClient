@@ -1,5 +1,6 @@
-// 左侧导航（总结4）：可折叠——默认收成左缘小箭头标签，点击标签显示/隐藏。
-// 展开态含 文件/搜索/回收站/传输/AI 助手/用户/设置 跳转 + 本地目录与服务端来源列表。
+// 左侧导航（总结4）：可折叠——默认收成左缘小箭头标签（0.1.4 起贴左上角），点击标签显示/隐藏；
+// 展开态折叠按钮同在左上角。展开态含 文件/搜索/回收站/传输/AI 助手/用户/设置 跳转 +
+// 本地目录与服务端来源列表；设置为视图（0.1.4），本页在设置视图下保持可见并高亮"设置"。
 import { useEffect, useState } from "react";
 import type { AppConfig } from "../lib/types";
 import { active } from "../lib/api";
@@ -18,7 +19,8 @@ import {
   IconChevronRight,
 } from "./icons";
 
-export type View = "files" | "trash" | "transfers" | "ai" | "search";
+// 0.1.4：settings 并入视图体系（需求2 改版后设置为主区整页视图，左侧导航保持可见/可折叠）
+export type View = "files" | "trash" | "transfers" | "ai" | "search" | "settings";
 
 interface Props {
   cfg: AppConfig;
@@ -58,7 +60,13 @@ export default function Sidebar(p: Props) {
 
   return (
     <aside className="sidebar">
+      {/* 0.1.4：折叠按钮移至导航栏左上角（与折叠态左缘标签同角，位置可预期） */}
       <div className="brand">
+        <button className="icon-btn brand-collapse" title="收起导航栏" onClick={p.onToggleCollapse}>
+          <span className="flip">
+            <IconChevronRight size={15} />
+          </span>
+        </button>
         <div className="brand-logo">
           <IconFolder size={22} />
         </div>
@@ -66,11 +74,6 @@ export default function Sidebar(p: Props) {
           <div className="brand-name">FileManage</div>
           <div className="brand-sub">云盘式文件管理</div>
         </div>
-        <button className="icon-btn brand-collapse" title="收起导航栏" onClick={p.onToggleCollapse}>
-          <span className="flip">
-            <IconChevronRight size={15} />
-          </span>
-        </button>
       </div>
 
       <nav className="nav">
@@ -155,7 +158,7 @@ export default function Sidebar(p: Props) {
           <span className="src-tag">{a.kind === "server" ? serverName(a.serverId ?? "") : "本地"}</span>
           {a.kind === "server" && !a.serverId ? "未选择" : ""}
         </div>
-        <button className="nav-item" onClick={p.onOpenSettings}>
+        <button className={p.view === "settings" ? "nav-item active" : "nav-item"} onClick={p.onOpenSettings}>
           <IconSettings size={17} /> 设置
         </button>
       </div>
