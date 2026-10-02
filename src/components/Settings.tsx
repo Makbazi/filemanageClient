@@ -87,7 +87,11 @@ export default function Settings(p: Props) {
 
   async function saveSrvForm() {
     if (!srvForm) return;
-    const conf = { ...srvForm.conf, baseUrl: srvForm.conf.baseUrl.replace(/\/+$/, "") };
+    // 0.1.3 修复：裸 host:port 缺协议头会让 reqwest URL 解析失败（报不透明的 "builder error"），
+    // 一律补全为 http://，随后照常走明文 http 的保存二次确认
+    let baseUrl = srvForm.conf.baseUrl.trim().replace(/\/+$/, "");
+    if (baseUrl && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(baseUrl)) baseUrl = `http://${baseUrl}`;
+    const conf = { ...srvForm.conf, baseUrl };
     if (!conf.name || !conf.baseUrl) return;
     // 安全升级：非本机地址的明文 http 传输（口令/文件可被嗅探）需显式二次确认
     if (conf.baseUrl.startsWith("http://") && !isLocalHostUrl(conf.baseUrl)) {
@@ -372,7 +376,7 @@ export default function Settings(p: Props) {
             />
           </div>
           <div className="field">
-            <label>服务地址（推荐 https://…；http:// 仅限可信局域网，保存时需确认）</label>
+            <label>服务地址（推荐 https://…；省略协议头按 http:// 处理，仅限可信局域网，保存时需确认）</label>
             <input
               value={srvForm.conf.baseUrl}
               placeholder="https://192.168.1.10:8484"

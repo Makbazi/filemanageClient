@@ -39,6 +39,29 @@ pub struct ServerConf {
     pub ca_file: Option<String>,
 }
 
+impl ServerConf {
+    /// 地址归一（0.1.3 修复）：去首尾空白；缺协议头的裸 `host[:port][/路径]` 按 `http://` 补全。
+    /// 缺 scheme 时 reqwest 的 URL 解析直接失败，但 Display 只有 "builder error" 一行，
+    /// 与网络故障无法区分；补全走明文 http——前端保存该形态时已二次确认风险。
+    pub(crate) fn norm_base(url: &str) -> String {
+        let t = url.trim();
+        if t.is_empty() {
+            return String::new();
+        }
+        let lower = t.to_ascii_lowercase();
+        if lower.starts_with("http://") || lower.starts_with("https://") {
+            t.to_string()
+        } else {
+            format!("http://{t}")
+        }
+    }
+
+    /// 拼接请求 URL 用的基础地址：归一 + 去尾部 '/'。
+    pub fn normalized_base(&self) -> String {
+        Self::norm_base(&self.base_url).trim_end_matches('/').to_string()
+    }
+}
+
 /// AI 能力配置（云厂商 OpenAI 兼容接口 / 本地 ollama）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -231,6 +254,12 @@ pub struct AppState {
 impl AppState {
     pub fn load(data_dir: PathBuf, cache_dir: PathBuf) -> Result<Self, String> {
         let mut cfg = read_config(&data_dir).unwrap_or_default();
+        // 0.1.3 修复：旧 config.json 的服务端地址可能缺协议头（裸 host:port，reqwest 报
+        // 不透明的 "builder error"）；启动即归一补 http://——Rust 请求路径与前端消费者
+        // （分享链接拼接等）共用同一权威值，下一次 save_config 自然落盘修正。
+        for s in cfg.servers.iter_mut() {
+            s.base_url = ServerConf::norm_base(&s.base_url);
+        }
         let keyring_ok = crate::secret::available();
         if keyring_ok {
             let mut migrated = false;

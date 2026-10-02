@@ -10,7 +10,7 @@
 
 | filemanageClient | 配套 filemanageServer | 说明 |
 |---|---|---|
-| 0.1.0（当前） | **0.1.x（推荐；当前 Server 0.1.1）**；0.7.x/0.6.x/0.5.x 亦可用 | 新增账户页自助改密（需 Server ≥0.1.0 的 `/auth/change-password`；配旧服务端时该按钮报 404/405，其余功能不变）。0.7.x/0.6.x 服务端下家目录虚拟根、jail 语义与登录态处理同 0.6.1。**Server 0.1.1（文件存储驱动、管理台切换/导出/暂停）为服务端存储与管理面增项，数据协议零变更，本客户端无感兼容（仅更新本兼容列表，代码不动）** |
+| 0.1.3（当前） | **0.1.x（推荐；当前 Server 0.1.1）**；0.7.x/0.6.x/0.5.x 亦可用 | 新增账户页自助改密（需 Server ≥0.1.0 的 `/auth/change-password`；配旧服务端时该按钮报 404/405，其余功能不变）。0.7.x/0.6.x 服务端下家目录虚拟根、jail 语义与登录态处理同 0.6.1。**Server 0.1.1（文件存储驱动、管理台切换/导出/暂停）为服务端存储与管理面增项，数据协议零变更，本客户端无感兼容（仅更新本兼容列表，代码不动）**。Client 0.1.1–0.1.3 为构建体系与客户端本地修复（baseUrl 协议头归一、连接错误透出），数据协议零变更，对本矩阵无影响 |
 | ≤0.6.1 | 0.5.x–0.7.x | 见 git 历史（已按需求39清空） |
 
 ## 未发布版本
@@ -54,6 +54,22 @@
   实测 @tauri-apps/cli 2.11.4 的 releases 类工具下载生效；raw.githubusercontent 的
   插件脚本仅认代理）。下载件缓存于共享卷 `fmc-cache`，配好镜像后任一环境成功一次
   即四环境及后续构建全复用。
+
+### 修复：服务端地址缺协议头导致连接报 "builder error"（2026-10-02，0.1.3；数据协议零变更）
+- **现象/成因**：服务地址填 `192.168.1.82:8484`（省略 `http://`）时客户端报
+  `无法连接服务端: builder error`，而同一地址 telnet/浏览器访问正常——reqwest 对缺
+  scheme 的字符串 `Url::parse` 失败归类为 Builder 错误，其 Display 只有字面
+  "builder error"（真实成因藏在 `source()`），请求在本机即失败、从未发出。
+- **三路归一**：`config.rs` 新增 `ServerConf::norm_base/normalized_base`（去首尾空白，
+  缺省 scheme 按 `http://` 补全）；`AppState::load` 启动即归一内存配置——Rust 请求
+  路径与前端消费方（分享链接拼接等）共用同一权威值，下一次 save_config 自然落盘修正；
+  `serverapi.rs` 的 `base_of`（全部请求 URL 的唯一拼接点）改用归一值，`apply_tls` 的
+  `insecure_tls` https 判断同口径；`Settings.tsx` 保存服务端先补协议头、再照常走
+  既有"明文 HTTP 二次确认"（非本机地址仍需显式确认，不静默绕过安全检查），表单标签
+  说明同步。
+- **错误透出**：`serverapi.rs` 新增 `req_detail/req_err`，六处"无法连接服务端"文案
+  带上 reqwest source（如 `builder error: relative URL without a base`），不再误导
+  为网络故障；`client_for/stream_client_for` 构造失败报"HTTP 客户端构造失败: …"带成因。
 
 ## [0.1.0] - 2026-09-22（首个基线版，需求31；双库全功能回归通过后定版）
 

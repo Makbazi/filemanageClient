@@ -7,6 +7,7 @@
 //! - 媒体缓存：把服务端文件拉到本地缓存目录，供 asset 协议播放（预览，需求11）
 
 use std::collections::HashMap;
+use std::error::Error as _;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -78,7 +79,7 @@ fn apply_tls(srv: &ServerConf, b: reqwest::ClientBuilder) -> Result<reqwest::Cli
         let cert = reqwest::Certificate::from_pem(&pem).map_err(|e| format!("CA 证书 PEM 解析失败: {e}"))?;
         b = b.add_root_certificate(cert);
     }
-    if srv.insecure_tls && srv.base_url.starts_with("https") {
+    if srv.insecure_tls && srv.normalized_base().starts_with("https://") {
         b = b.danger_accept_invalid_certs(true);
     }
     Ok(b)
@@ -89,17 +90,37 @@ fn client_for(srv: &ServerConf) -> Result<reqwest::Client, String> {
     let b = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(120));
-    apply_tls(srv, b)?.build().map_err(|e| e.to_string())
+    apply_tls(srv, b)?
+        .build()
+        .map_err(|e| format!("HTTP 客户端构造失败: {}", req_detail(&e)))
 }
 
 /// 大流量传输客户端：不设总超时（大文件下载/上传耗时不可预估）。
 fn stream_client_for(srv: &ServerConf) -> Result<reqwest::Client, String> {
     let b = reqwest::Client::builder().connect_timeout(Duration::from_secs(15));
-    apply_tls(srv, b)?.build().map_err(|e| e.to_string())
+    apply_tls(srv, b)?
+        .build()
+        .map_err(|e| format!("HTTP 客户端构造失败: {}", req_detail(&e)))
 }
 
+/// 拼接请求 URL 的基础地址（0.1.3 修复：经归一——裸 host:port 补 http://，防 reqwest
+/// URL 解析失败被吞成误导性的 "builder error"）。
 fn base_of(srv: &ServerConf) -> String {
-    srv.base_url.trim_end_matches('/').to_string()
+    srv.normalized_base()
+}
+
+/// reqwest 错误真实成因：构造类失败（URL/头等）的 Display 只有 "builder error" 一行，
+/// 成因藏在 source 里；统一带出，避免用户误判为网络问题（0.1.3 修复）。
+fn req_detail(e: &reqwest::Error) -> String {
+    match e.source() {
+        Some(s) => format!("{e}: {s}"),
+        None => e.to_string(),
+    }
+}
+
+/// 请求发送类错误统一文案。
+fn req_err(e: reqwest::Error) -> String {
+    format!("无法连接服务端: {}", req_detail(&e))
 }
 
 /// 限速节拍：传输 bytes 字节后按 limit_kbps 补齐等待时间（0 = 不限速）。
@@ -133,7 +154,7 @@ pub async fn srv_login(
         .json(&json!({ "username": username, "password": password }))
         .send()
         .await
-        .map_err(|e| format!("无法连接服务端: {e}"))?;
+        .map_err(req_err)?;
     let status = resp.status();
     let body: Value = resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
     if !status.is_success() {
@@ -219,7 +240,7 @@ pub async fn srv_change_password(
         .json(&json!({ "oldPassword": old_password, "newPassword": new_password }))
         .send()
         .await
-        .map_err(|e| format!("无法连接服务端: {e}"))?;
+        .map_err(req_err)?;
     let status = resp.status();
     let body: Value = resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
     if !status.is_success() {
@@ -267,7 +288,7 @@ async fn try_refresh(app: &AppHandle, server_id: &str) -> Result<String, String>
         .json(&json!({ "refreshToken": rt }))
         .send()
         .await
-        .map_err(|e| format!("无法连接服务端: {e}"))?;
+        .map_err(req_err)?;
     let status = resp.status();
     let body: Value = resp.json().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -387,7 +408,7 @@ pub async fn srv_call(
         if let Some(b) = &body {
             req = req.json(b);
         }
-        let resp = req.send().await.map_err(|e| format!("无法连接服务端: {e}"))?;
+        let resp = req.send().await.map_err(req_err)?;
         let status = resp.status();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if status.as_u16() == 401 && attempt == 0 {
@@ -425,7 +446,7 @@ async fn authed_get(
         if let Some(from) = range_from {
             req = req.header("Range", format!("bytes={from}-"));
         }
-        let resp = req.send().await.map_err(|e| format!("无法连接服务端: {e}"))?;
+        let resp = req.send().await.map_err(req_err)?;
         if resp.status().as_u16() == 401 && attempt == 0 {
             if try_refresh(app, server_id).await.is_ok() {
                 continue;
@@ -769,7 +790,7 @@ async fn put_chunk(
         let resp = req
             .send()
             .await
-            .map_err(|e| format!("无法连接服务端: {e}"))?;
+            .map_err(req_err)?;
         let status = resp.status();
         if status.is_success() {
             return Ok(());

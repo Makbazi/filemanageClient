@@ -116,7 +116,14 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.1.0；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+0.1.3（0.1.1/0.1.2 为构建体系批次）；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+**0.1.3（2026-10-02 修复，数据协议零变更）**：服务端地址缺协议头归一——`baseUrl` 为裸
+`host:port` 时统一补 `http://`（`config.rs` `ServerConf::norm_base/normalized_base`，
+`AppState::load` 启动归一内存值、随下一次保存落盘；`serverapi.rs` 全部请求 URL 的唯一
+拼接点 `base_of` 取归一值，`insecure_tls` 的 https 判断同口径；`Settings.tsx` 保存服务端
+先补协议头、再走既有明文 HTTP 二次确认）。连接类错误统一带出 reqwest 真实成因
+（`req_detail/req_err`）——此前裸 host:port 只报 `无法连接服务端: builder error`
+（reqwest 把 URL 解析失败归为 Builder 类，Display 不含 source），与网络故障无法区分。
 **0.1.1 服务端（需求40：内置文件存储驱动 + 管理台切换/导出/暂停）对本客户端零影响**：
 `/api/v1` 数据协议零变更，客户端代码/版本号不改动，仅更新本兼容列表——暂停维护窗口内
 业务端点返回 503、health `db` 字段可能为 `"file"`，均落入客户端既有错误/探测容错路径。0.1.0 批次（需求31，自助改密）：
