@@ -23,6 +23,7 @@
 #   按需透传（GitHub 工具链下载加速，见 README"已知网络注意事项"），本脚本不处理。
 #
 # 流程：/src 工程 rsync 到 /work（持久卷，src-tauri/target 等排除项增量复用）
+#      → 清掉本 profile 遗留的 bundle/ 产物目录（防旧版本安装包混入收集）
 #      → npm ci → tauri build → 产物按 工程名_平台_版本号.扩展名 规范复制回
 #      /src/release/[debug/]。
 # =============================================================================
@@ -62,6 +63,18 @@ else
     echo "==> 工程版本: $VERSION（来自 package.json）"
 fi
 
+# ---- 1.5 清理上次构建遗留的打包产物目录 ----
+# /work 卷跨构建持久（rsync 排除 target/），而 tauri-bundler（实测 2.9.4）把最终
+# 安装包按 "产品名_版本号[_arch]" 落在 target/.../<profile>/bundle/<type>/ 根目录，
+# 每次只清自己的中间暂存子目录——旧版本号的包会永久残留。若不清理，collect() 的
+# find|head -1 可能静默取到旧安装包并冠以新版本号（症状：产物名版本正确、界面却是旧的，
+# 典型触发：升级版本后 Jenkins 首跑 / win 卷带旧 exe 而 deb 卷恰好只有一份新产物时）。
+BUNDLE_ROOT="src-tauri/target"
+[[ -n "$TRIPLE" ]] && BUNDLE_ROOT="src-tauri/target/${TRIPLE}"
+BUNDLE_ROOT="${BUNDLE_ROOT}/${PROFILE}"
+rm -rf "${BUNDLE_ROOT}/bundle"
+BUNDLE_ROOT="${BUNDLE_ROOT}/bundle"
+
 # ---- 2. 前端依赖 ----
 echo "==> npm ci"
 npm ci --no-audit --no-fund --loglevel=error
@@ -91,16 +104,15 @@ echo "==> npm run tauri -- ${TAURI_ARGS[*]}"
 npm run tauri -- "${TAURI_ARGS[@]}"
 
 # ---- 4. 收集产物并按命名规范复制到 /src/release[debug] ----
-BUNDLE_ROOT="src-tauri/target"
-[[ -n "$TRIPLE" ]] && BUNDLE_ROOT="src-tauri/target/${TRIPLE}"
-BUNDLE_ROOT="${BUNDLE_ROOT}/${PROFILE}/bundle"
+# （BUNDLE_ROOT 已在 1.5 节定义并清空重建）
 
 DEST="/src/${OUT_SUB}"
 mkdir -p "$DEST"
 
 collect() { # $1=bundle子目录 $2=glob $3=平台标签 $4=扩展名
     local sub="$1" glob="$2" token="$3" ext="$4" src name
-    src="$(find "${BUNDLE_ROOT}/${sub}" -maxdepth 1 -name "${glob}" 2>/dev/null | head -1 || true)"
+    # 取 mtime 最新的一份（纵深防御：即便 1.5 的清理被绕过，也不会拿旧包）
+    src="$(find "${BUNDLE_ROOT}/${sub}" -maxdepth 1 -name "${glob}" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
     if [[ -z "$src" ]]; then
         echo "    !! 未找到 ${sub} 产物（期望 ${glob}）" >&2
         return 1
