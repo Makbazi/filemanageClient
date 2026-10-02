@@ -1237,6 +1237,53 @@ input[type="radio"] {
   width: 110px;
 }
 
+/* 版本信息（0.1.5）：设置页头右侧常驻版本徽标 + "关于"页签卡片 */
+.settings-ver {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  padding-top: 3px;
+}
+.settings-ver .ver {
+  font-family: ui-monospace, monospace;
+  font-size: 12.5px;
+  color: var(--accent-text);
+  background: var(--hover-2);
+  border-radius: 999px;
+  padding: 2px 9px;
+  user-select: text;
+}
+.about-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 18px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card-bg);
+  text-align: center;
+}
+.about-name {
+  font-size: 16px;
+  font-weight: 700;
+}
+.about-ver {
+  font-family: ui-monospace, monospace;
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--accent-text);
+  letter-spacing: 0.5px;
+  user-select: text;
+}
+.about-val {
+  font-family: ui-monospace, monospace;
+  font-size: 12.5px;
+  text-align: right;
+}
+
 /* 主题选择卡片（需求5） */
 .theme-grid {
   display: grid;
