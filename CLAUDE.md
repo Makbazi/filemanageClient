@@ -29,7 +29,9 @@ src/lib/
   transtypes.ts        TransferTask/TransferStatus 共享契约（状态串 = Rust 事件）
   theme.ts             THEMES 注册 + applyTheme(data-theme)
   types.ts format.ts errors.ts(AuthError)
-  preview.ts           viewableType 查看/预览统一类型判定 + 文本解码
+  preview.ts           viewableType 查看/预览统一类型判定 + 文本解码 + RAW_EXT
+                       （0.2.1 各相机 RAW 扩展名并入 image 分支；与 Rust thumb.rs
+                       is_raw_ext 同表——kind 不改，显示分流一律走 viewableType）
                        （App/FileView/FileGrid/SearchView/FileViewer/PreviewModal 共享）
 src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView TransfersView
                        AIView PreviewModal FileViewer ShareDialog AclDialog VersionsDialog
@@ -45,7 +47,7 @@ src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView Tra
                        全部/上传/下载筛选；ContextMenu/UploadToDialog：本地文件右键上传到
                        一个/多个远程（0.6.0 需求7））
 src/styles/            base.css（组件）+ themes.css（5 套主题变量）
-src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret 的 command 注册 + 启动清理)
+src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb 的 command 注册 + 启动清理)
                        config.rs(AppConfig: localRoots/servers(caFile)/ai/active/ui(sidebarCollapsed)/
                                   transfer/trashRetentionDays；keyring_ok；update() 统一做
                                   令牌同步凭证库+config.json 脱敏)
@@ -54,8 +56,12 @@ src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret 的 com
                                   analysis_tasks；open_and_migrate 幂等迁移 user_version；
                                   旧 *.json 首次启动自动导入后改名 *.imported)
                        localfs.rs(防逃逸 fs_* + 本地版本库 + fs_import/export + fs_walk(0.2.0 目录树枚举，需求41) +
-                                  fs_media_cache(0.1.7 起带可选 ver 版本串入缓存键))
-                       serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache(同 ver)/preview_data/thumb + transfer_cancel)
+                                  fs_media_cache(0.1.7 起带可选 ver 版本串入缓存键；0.2.1 RAW 存提取的内嵌预览 .jpg) +
+                                  fs_thumb(0.2.1 网格缩略图：媒体缓存 ≤512px .thumb.jpg 路径))
+                       serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache(同 ver，0.2.1 同 RAW 分支；内部 srv_media_ensure)/preview_data + srv_thumb(0.2.1 改版：加 ver、返回缩略图路径) + transfer_cancel)
+                       thumb.rs(0.2.1 相机 RAW：is_raw_ext 品牌扩展表 + extract_preview 字节级最大内嵌 JPEG
+                                  提取（SOI 扫描 + 段链校验至 EOI，熵数据/progressive 合法，垃圾候选拒绝）+
+                                  ensure_thumb image 缩放 ≤512px JPEG 入媒体缓存)
                        ai.rs(本地 AI)
 ```
 
@@ -115,9 +121,16 @@ cd src-tauri && cargo check
    兼容旧 config.json。
 7. **主题**：颜色一律用 CSS 变量（themes.css），组件样式禁止硬编码色值；
    新主题 = themes.css 增加一个 `[data-theme=...]` 块 + theme.ts THEMES 注册。
-8. **预览/查看（0.1.7 契约）**：图片/视频/音频/PDF 一律经媒体缓存 + `convertFileSrc`
+8. **预览/查看（0.1.7 契约；0.2.1 增缩略图全量 + RAW）**：图片/视频/音频/PDF 一律经媒体缓存 + `convertFileSrc`
    （asset 协议 scope 只授权应用缓存目录；无大小上限——大图片可看；缓存键必须并入
    `ver`＝entry.mtime 串，防覆盖后 exists 短路命中旧内容）；文本用 data URL（仍 ≤8MiB）。
+   **相机 RAW（0.2.1）**：浏览器不可解码——`viewableType` 按 `RAW_EXT`（与 Rust
+   `thumb.rs::is_raw_ext` 同表）归入 image，媒体缓存存的是 Rust 从文件提取的**最大
+   内嵌 JPEG 预览**（`.jpg`，非原始字节），查看/预览/缩略图共享该条目；不得改为整文件
+   入缓存再 `<img>` 直挂。网格缩略图一律 `thumbPath`（fs_thumb/srv_thumb → 媒体缓存
+   ≤512px `.thumb.jpg` 路径 → convertFileSrc；null 回退图标），大图与 RAW 无需点眼睛
+   即可见（眼睛/角标/右键预览入口保留）；服务端模式首过整文件入缓存属已接受代价
+   （与预览共享），并发池 3 限流。
    预览＝PreviewModal 缩放弹窗（"缩略图"观感，入口＝眼睛/角标/右键"预览"）；
    查看＝FileViewer 主区覆盖层（入口＝双击/右键"查看"，双击图片/Esc/X 关闭，
    全屏＝窗口 `setFullscreen`＋CSS 覆盖层，**禁用 DOM requestFullscreen**——
@@ -141,8 +154,8 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.0）** / 0.1.x / 0.7.x / 0.6.x（配旧服务端目录上传自动退化逐个 mkdir，其余数据协议零变更）。
-**0.2.0（2026-10-03 目录上传，需求41；依赖 Server 0.2.0 加性端点 `POST /api/v1/mkdirs`，配旧服务端自动退化逐个 `mkdir`）**：本地模式右键目录 →"上传目录到远程…"——Rust `fs_walk` 递归枚举（符号链接/`.fmtrash` 跳过，深度 64/条目 20000 上限，超限整体拒绝绝不传半棵树）→ `serverMkdirs` 一次建好远端目录骨架（含空目录）→ 逐文件经并发池（3）入组队列；传输 UI **整目录聚合为一条组行**（总字节进度 + `done/total 个文件`，暂停/继续/取消/重试整组粒度；冲突文件组重试按覆盖语义重跑，服务端覆盖前先存版本，需求3）。`UploadToDialog` 新增 `isDir`；transfer.ts 新增 `enqueueGroup/settle/pump/组级 API/rowActions`（子任务只进注册表不进 order，UI 快照天然只见组行；`removeTask/clearFinished` 级联清理子任务）；`watchGroup` 整组终态才一次汇总通知+刷新。已知限制：组内子任务暂不可展开（`getGroupChildren` API 已留）、20000 条硬上限、非 UTF8 文件名沿用 `fs_list` lossy 口径。
+0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.0）** / 0.1.x / 0.7.x / 0.6.x（0.2.1 数据协议零变更，兼容关系承接 0.2.0）。
+**0.2.1（2026-10-03 网格缩略图全量显示 + 相机 RAW；数据协议零变更）**：需求原句——按缩略图浏览时也要显示文件内容（图片、以及尼康 NEF 等各品牌 RAW），点不点眼睛都能看（眼睛预览保留）。根因：网格走 `thumbData` data URL（本地 ≤4MiB/srv_thumb ≤2MiB/筛选 ≤8MiB）且过滤 `kind==="image"`，大图与 RAW（kind=other）只剩图标。**新 Rust `thumb.rs`**：`extract_preview` 字节级提取 RAW 内**最大完整 JPEG 预览**（SOI→按段链校验至 EOI，SOS 熵数据只认填充字节/RST/progressive 间 DHT，坏结构候选拒绝——绝不半张图当预览）；`fs_media_cache`/`srv_media_cache` RAW 分支把提取结果存为 `<key_hash>.jpg`（服务端经可续传 scratch 转存后删源）→ 双击查看/眼睛预览自动支持 RAW（零新端点、Server 零改动，字节仍走既有 `/api/v1/preview`，匿名语义不变）；新 `fs_thumb`/改版 `srv_thumb`（加 ver、返回媒体缓存 `<key_hash>.thumb.jpg` ≤512px 路径，svg/heic 等缩放失败且 ≤8MiB 回传原路径）→ `DataSource.thumbData` 替换为 `thumbPath`。前端：`RAW_EXT` 并入 `viewableType` image 分支（kind 不改）、网格 effect 改 `viewableType` 判定去大小上限、并发池 3、`convertFileSrc` 加载；`PreviewModal` 分流统一 `viewableType`。新增依赖 `image` crate（default-features 关，仅常用光栅解码+jpeg 编码）。已知边界：服务端首过整文件入缓存（`$APPCACHE/media` 无淘汰为既有缺口，本批使用面扩大）；RAW 保真=相机内嵌预览（非全精度解码）；缩略图仍限前 60。**0.2.0（2026-10-03 目录上传，需求41；依赖 Server 0.2.0 加性端点 `POST /api/v1/mkdirs`，配旧服务端自动退化逐个 `mkdir`）**：本地模式右键目录 →"上传目录到远程…"——Rust `fs_walk` 递归枚举（符号链接/`.fmtrash` 跳过，深度 64/条目 20000 上限，超限整体拒绝绝不传半棵树）→ `serverMkdirs` 一次建好远端目录骨架（含空目录）→ 逐文件经并发池（3）入组队列；传输 UI **整目录聚合为一条组行**（总字节进度 + `done/total 个文件`，暂停/继续/取消/重试整组粒度；冲突文件组重试按覆盖语义重跑，服务端覆盖前先存版本，需求3）。`UploadToDialog` 新增 `isDir`；transfer.ts 新增 `enqueueGroup/settle/pump/组级 API/rowActions`（子任务只进注册表不进 order，UI 快照天然只见组行；`removeTask/clearFinished` 级联清理子任务）；`watchGroup` 整组终态才一次汇总通知+刷新。已知限制：组内子任务暂不可展开（`getGroupChildren` API 已留）、20000 条硬上限、非 UTF8 文件名沿用 `fs_list` lossy 口径。
 **0.1.7（2026-10-03 查看/预览分离+大图片查看+查看器全屏，数据协议零变更）**：双击**可预览类型**
 （`viewableType`：image/video/audio/pdf/文本扩展名）→ 新建 `FileViewer` 主区覆盖层就地显示
 （`<main>` 加 `position:relative`，`.viewer` absolute 盖住列表与顶栏——**不顶替 FileView 插槽**，

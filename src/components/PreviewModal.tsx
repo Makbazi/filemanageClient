@@ -6,7 +6,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import type { FsEntry } from "../lib/types";
 import * as api from "../lib/api";
 import { fmtSize } from "../lib/format";
-import { TEXT_EXT, extOf, b64ToText } from "../lib/preview";
+import { b64ToText, viewableType } from "../lib/preview";
 import { Modal } from "./Modals";
 import { IconDownload } from "./icons";
 
@@ -22,10 +22,9 @@ export default function PreviewModal(p: Props) {
   const [dataUrl, setDataUrl] = useState("");
   const [mediaUrl, setMediaUrl] = useState("");
   const e = p.entry;
-  const ext = extOf(e.name);
-  const isText = TEXT_EXT.includes(ext);
-  const isPdf = ext === "pdf";
-  const isMedia = e.kind === "video" || e.kind === "audio";
+  // 0.2.1：显示分流统一走 viewableType（与查看器同一支持集，含相机 RAW——
+  // kind 为 other 但 Rust 可提取内嵌 JPEG 预览入媒体缓存，图像/媒体按图片通道）
+  const vt = viewableType(e);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,10 +33,10 @@ export default function PreviewModal(p: Props) {
       setBusy(true);
       setErr("");
       try {
-        if (isText) {
+        if (vt === "text") {
           const d = await src.previewData(e);
           if (!cancelled) setDataUrl(d);
-        } else if (e.kind === "image" || isMedia || isPdf) {
+        } else if (vt) {
           // 0.1.7：图像改走缓存通道（fs/srv_media_cache 无大小上限），大图预览不再报"文件过大"
           const path = await src.mediaCache(e);
           if (!cancelled) setMediaUrl(convertFileSrc(path));
@@ -65,17 +64,17 @@ export default function PreviewModal(p: Props) {
           </div>
         )}
         {err && <div className="error-bar">{err}</div>}
-        {!busy && !err && mediaUrl && e.kind === "image" && <img src={mediaUrl} alt={e.name} />}
+        {!busy && !err && mediaUrl && vt === "image" && <img src={mediaUrl} alt={e.name} />}
         {!busy && !err && dataUrl && <pre className="preview-text">{b64ToText(dataUrl)}</pre>}
-        {!busy && !err && mediaUrl && e.kind === "video" && (
+        {!busy && !err && mediaUrl && vt === "video" && (
           <video className="preview-video" src={mediaUrl} controls autoPlay />
         )}
-        {!busy && !err && mediaUrl && e.kind === "audio" && (
+        {!busy && !err && mediaUrl && vt === "audio" && (
           <div className="preview-audio-wrap">
             <audio src={mediaUrl} controls autoPlay style={{ width: "100%" }} />
           </div>
         )}
-        {!busy && !err && mediaUrl && isPdf && (
+        {!busy && !err && mediaUrl && vt === "pdf" && (
           <embed className="preview-pdf" src={mediaUrl} type="application/pdf" />
         )}
         {unsupported && (

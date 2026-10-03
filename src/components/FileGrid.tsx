@@ -8,7 +8,8 @@ import { kindIcon, IconEye } from "./icons";
 interface Props {
   entries: FsEntry[];
   sel: Set<string>;
-  /** path → 缩略图 data URL（null=无缩略图，用类型图标） */
+  /** path → 缩略图 src（0.2.1：媒体缓存 ≤512px 图的 asset URL，RAW 为内嵌
+   *  预览提取缩放；null=无缩略图，用类型图标） */
   thumbs: Record<string, string | null>;
   onToggle(e: FsEntry, multi: boolean): void;
   /** 双击=查看 */

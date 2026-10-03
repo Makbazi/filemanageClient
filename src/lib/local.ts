@@ -95,10 +95,14 @@ export class LocalSource implements DataSource {
     }) as Promise<string>;
   }
 
-  async thumbData(entry: FsEntry): Promise<string | null> {
-    if (entry.kind !== "image" || entry.size > 4 << 20) return null;
+  async thumbPath(entry: FsEntry): Promise<string | null> {
+    // 0.2.1：Rust 生成 ≤512px 缩略图路径（RAW 取内嵌预览）；失败/不支持回退图标
     try {
-      return await this.previewData(entry);
+      return (await invoke("fs_thumb", {
+        rootId: this.rootId,
+        path: entry.path,
+        ver: String(entry.mtime),
+      })) as string;
     } catch {
       return null;
     }

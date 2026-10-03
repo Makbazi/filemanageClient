@@ -1,6 +1,6 @@
 [package]
 name = "filemanageclient"
-version = "0.2.0"
+version = "0.2.1"
 description = "FileManage 云盘式文件管理器客户端"
 authors = ["mon"]
 edition = "2021"
@@ -25,6 +25,8 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 keyring = "2"
+# 0.2.1 网格缩略图缩放（仅解码常见光栅图 + JPEG 编码；无默认重型特性）
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
 
 [profile.release]
 codegen-units = 1
