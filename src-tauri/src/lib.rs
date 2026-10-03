@@ -1,6 +1,6 @@
 //! FileManage 客户端 Rust 侧入口：
 //! config（配置）/ localdb（本地元数据 sqlite）/ localfs（本地目录+版本+媒体缓存）/
-//! serverapi（分片传输+会话续期）/ ai（本地 AI）。
+//! serverapi（分片传输+会话续期）/ ai（本地 AI）/ thumb（缩略图与 RAW 内嵌预览提取）。
 
 mod ai;
 mod config;
@@ -8,6 +8,7 @@ mod localdb;
 mod localfs;
 mod secret;
 mod serverapi;
+mod thumb;
 
 use config::AppConfig;
 use tauri::{AppHandle, Manager};
@@ -76,6 +77,7 @@ pub fn run() {
             localfs::fs_import,
             localfs::fs_export,
             localfs::fs_media_cache,
+            localfs::fs_thumb,
             // 本地版本管理（需求13）
             localfs::fs_versions_list,
             localfs::fs_versions_rollback,

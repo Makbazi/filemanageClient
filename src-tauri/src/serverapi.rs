@@ -813,9 +813,86 @@ fn simple_hash(s: &str) -> u64 {
     h.finish()
 }
 
-/// 把服务端文件拉到本地媒体缓存目录（asset 协议已授权），返回缓存绝对路径。
+/// 媒体缓存键（与 localfs::cache_key 同构，前缀多 server_id）；
+/// srv_media_cache 与 srv_thumb 共用，缩略图条目 = `<key_hash>.thumb.jpg`。
+fn srv_media_key(server_id: &str, root_id: &str, path: &str, ver: Option<&str>) -> String {
+    match ver {
+        Some(v) => format!("{server_id}/{root_id}/{path}@{v}"),
+        None => format!("{server_id}/{root_id}/{path}"),
+    }
+}
+
+/// 把服务端文件确保纳入本地媒体缓存目录（asset 协议已授权），返回缓存路径。
 /// 供 <img>/<video>/<audio>/<embed> 直接加载（asset 协议支持 Range）。
 /// 0.1.7：可选 ver（前端传 entry.mtime 串）并入缓存键，防覆盖后 exists 命中旧内容。
+/// 0.2.1：相机 RAW 浏览器不可解码——先落可续传 scratch 下载原始字节，再提取
+/// **最大内嵌 JPEG 预览**定名 .jpg 并删 scratch（提取失败留 scratch 供重试）；
+/// 提取失败报错、前端回退图标。字节来源为既有 `GET /api/v1/preview`（同端点
+/// 同权限，服务端零改动，需求6 匿名语义不变）。非 RAW 下载语义不变：
+/// download_inner 经 `<dest>.part` 断点续传、完成 rename，exists 只命中成品。
+pub(crate) async fn srv_media_ensure(
+    app: &AppHandle,
+    server_id: &str,
+    root_id: &str,
+    path: &str,
+    ver: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    use std::fs;
+    let st = state(app);
+    let srv = st.server(server_id)?;
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let raw = crate::thumb::is_raw_ext(&ext);
+    let key = srv_media_key(server_id, root_id, path, ver);
+    let key_hash = simple_hash(&key);
+    let cache_name = format!("{:x}.{}", key_hash, if raw { "jpg" } else { ext.as_str() });
+    let dest = st.media_cache_dir().join(&cache_name);
+    if dest.exists() {
+        return Ok(dest); // 简单缓存命中
+    }
+    let url = format!("{}/api/v1/preview", base_of(&srv));
+    let limit = st.config().transfer.download_limit_kbps;
+    let name = path.rsplit('/').next().unwrap_or("media").to_string();
+    let flag = Arc::new(AtomicU8::new(SIG_NONE));
+    if !raw {
+        let dest_s = dest.to_string_lossy().to_string();
+        download_inner(
+            app,
+            server_id,
+            &url,
+            &[("rootId", root_id), ("path", path)],
+            &dest_s,
+            &format!("media-{key_hash:x}"),
+            &name,
+            limit,
+            &flag,
+        )
+        .await?;
+        return Ok(dest);
+    }
+    // RAW：原始字节下到 scratch（可续传），提取预览后 scratch 删除不双占空间
+    let scratch = st.media_cache_dir().join(format!("{key_hash:x}.raw-src"));
+    if !scratch.exists() {
+        download_inner(
+            app,
+            server_id,
+            &url,
+            &[("rootId", root_id), ("path", path)],
+            &scratch.to_string_lossy(),
+            &format!("media-{key_hash:x}"),
+            &name,
+            limit,
+            &flag,
+        )
+        .await?;
+    }
+    let data = fs::read(&scratch).map_err(|e| e.to_string())?;
+    let jpeg = crate::thumb::extract_preview(&data)
+        .ok_or("该 RAW 未找到完整内嵌 JPEG 预览，请下载后用 RAW 软件查看")?;
+    fs::write(&dest, &jpeg).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(&scratch);
+    Ok(dest)
+}
+
 #[tauri::command]
 pub async fn srv_media_cache(
     app: AppHandle,
@@ -824,36 +901,8 @@ pub async fn srv_media_cache(
     path: String,
     ver: Option<String>,
 ) -> Result<String, String> {
-    let st = state(&app);
-    let srv = st.server(&server_id)?;
-    let ext = path.rsplit('.').next().unwrap_or("bin");
-    let key = match ver.as_deref() {
-        Some(v) => format!("{server_id}/{root_id}/{path}@{v}"),
-        None => format!("{server_id}/{root_id}/{path}"),
-    };
-    let cache_name = format!("{:x}.{}", simple_hash(&key), ext);
-    let dest = st.media_cache_dir().join(&cache_name);
-    let dest_s = dest.to_string_lossy().to_string();
-    if dest.exists() {
-        return Ok(dest_s); // 简单缓存命中
-    }
-    let url = format!("{}/api/v1/preview", base_of(&srv));
-    let limit = st.config().transfer.download_limit_kbps;
-    let name = path.rsplit('/').next().unwrap_or("media").to_string();
-    let flag = Arc::new(AtomicU8::new(SIG_NONE));
-    download_inner(
-        &app,
-        &server_id,
-        &url,
-        &[("rootId", root_id.as_str()), ("path", path.as_str())],
-        &dest_s,
-        &format!("media-{}", simple_hash(&dest_s)),
-        &name,
-        limit,
-        &flag,
-    )
-    .await?;
-    Ok(dest_s)
+    let p = srv_media_ensure(&app, &server_id, &root_id, &path, ver.as_deref()).await?;
+    Ok(p.to_string_lossy().into_owned())
 }
 
 /// 小文件预览：拉取内容返回 data URL（图像/文本等 ≤ max_bytes）。
@@ -904,13 +953,31 @@ pub async fn srv_preview_data(
     ))
 }
 
-/// 服务端文件缩略图（网格视图，需求14）：图像返回 data URL，超限/非图像报错由前端回退图标。
+/// 服务端文件缩略图（网格视图，需求14；0.2.1 改版）：确保媒体缓存条目后在缓存
+/// 目录生成/复用 ≤512px JPEG，**返回缓存绝对路径**（前端 convertFileSrc；旧版
+/// 是 ≤2MiB data URL——大图/RAW 一律失败回退图标，是"只有点眼睛才能看到内容"
+/// 的根因）。无法缩放解码（svg/ico/heic 等）时：≤8MiB 直接回传媒体缓存原路径
+/// 交给浏览器渲染，否则报错由前端回退类型图标。大文件缩略图会把整文件拉入
+/// 媒体缓存（与眼睛预览/双击查看同一缓存，看过一次后秒出；缓存无淘汰为既有缺口）。
 #[tauri::command]
 pub async fn srv_thumb(
     app: AppHandle,
     server_id: String,
     root_id: String,
     path: String,
+    ver: Option<String>,
 ) -> Result<String, String> {
-    srv_preview_data(app, server_id, root_id, path, Some(2 << 20)).await
+    let src = srv_media_ensure(&app, &server_id, &root_id, &path, ver.as_deref()).await?;
+    let st = state(&app);
+    let key = srv_media_key(&server_id, &root_id, &path, ver.as_deref());
+    match crate::thumb::ensure_thumb(&st, &key, &src) {
+        Ok(t) => Ok(t.to_string_lossy().into_owned()),
+        Err(e) => {
+            if std::fs::metadata(&src).map(|m| m.len() <= 8 << 20).unwrap_or(false) {
+                Ok(src.to_string_lossy().into_owned())
+            } else {
+                Err(e)
+            }
+        }
+    }
 }

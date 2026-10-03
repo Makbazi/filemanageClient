@@ -789,11 +789,62 @@ fn cache_hash(s: &str) -> u64 {
     h.finish()
 }
 
-/// 把本地根内文件硬链接（或复制）到媒体缓存目录，返回缓存绝对路径。
+/// 媒体缓存键（0.1.7 起含 ver 版本串）；fs_media_cache 与 fs_thumb 共用，
+/// 保证缩略图条目 `<key_hash>.thumb.jpg` 与媒体条目 `<key_hash>.<ext>` 同源。
+fn cache_key(root_id: &str, path: &str, ver: Option<&str>) -> String {
+    match ver {
+        Some(v) => format!("{root_id}/{path}@{v}"),
+        None => format!("{root_id}/{path}"),
+    }
+}
+
+fn ext_of(path: &str) -> String {
+    path.rsplit('.').next().unwrap_or("").to_lowercase()
+}
+
+/// 把本地根内文件确保纳入媒体缓存目录，返回缓存绝对路径。
 /// asset 协议仅授权缓存目录，避免放开任意路径。
-/// 0.1.7：可选 ver（前端传 entry.mtime 串）并入缓存键——图片预览/查看也走
-/// 本通道后，键只含路径会在覆盖写后被 dest.exists() 命中旧内容（data URL
-/// 时代无此问题）；带版本串则自动重拉。
+/// 0.1.7：可选 ver 并入缓存键——覆盖写后旧键自然失效重拉（data URL 时代无此问题）。
+/// 0.2.1：相机 RAW（NEF/CR2/…）浏览器无法解码——缓存的不再是原始字节，而是
+/// 从文件内提取的**最大内嵌 JPEG 预览**（存为 .jpg）；无完整内嵌 JPEG 则报错，
+/// 前端回退图标。双击查看/眼睛预览/网格缩略图因此全链路支持 RAW，服务端零改动。
+pub(crate) fn media_cache_path(
+    st: &AppState,
+    root_id: &str,
+    path: &str,
+    ver: Option<&str>,
+) -> Result<PathBuf, String> {
+    let root = st.root_path(root_id)?;
+    let abs = resolve_in_root(&root, path)?;
+    if !abs.is_file() {
+        return Err("不是文件".into());
+    }
+    let ext = ext_of(path);
+    let raw = crate::thumb::is_raw_ext(&ext);
+    let key = cache_key(root_id, path, ver);
+    let name = format!("{:x}.{}", cache_hash(&key), if raw { "jpg" } else { ext.as_str() });
+    let dest = st.media_cache_dir().join(&name);
+    if dest.exists() {
+        return Ok(dest);
+    }
+    if raw {
+        let md = fs::metadata(&abs).map_err(|e| e.to_string())?;
+        if md.len() > 512 << 20 {
+            return Err("RAW 文件过大（>512MiB），不提取内嵌预览".into());
+        }
+        let data = fs::read(&abs).map_err(|e| e.to_string())?;
+        let jpeg = crate::thumb::extract_preview(&data)
+            .ok_or("该 RAW 未找到完整内嵌 JPEG 预览，请下载后用 RAW 软件查看")?;
+        fs::write(&dest, &jpeg).map_err(|e| e.to_string())?;
+        return Ok(dest);
+    }
+    let linked = fs::hard_link(&abs, &dest);
+    if linked.is_err() {
+        fs::copy(&abs, &dest).map_err(|e| e.to_string())?;
+    }
+    Ok(dest)
+}
+
 #[tauri::command]
 pub async fn fs_media_cache(
     app: AppHandle,
@@ -802,23 +853,32 @@ pub async fn fs_media_cache(
     ver: Option<String>,
 ) -> Result<String, String> {
     let st = state(&app);
-    let root = st.root_path(&root_id)?;
-    let abs = resolve_in_root(&root, &path)?;
-    if !abs.is_file() {
-        return Err("不是文件".into());
-    }
-    let ext = path.rsplit('.').next().unwrap_or("bin");
-    let key = match ver.as_deref() {
-        Some(v) => format!("{root_id}/{path}@{v}"),
-        None => format!("{root_id}/{path}"),
-    };
-    let name = format!("{:x}.{}", cache_hash(&key), ext);
-    let dest = st.media_cache_dir().join(&name);
-    if !dest.exists() {
-        let linked = fs::hard_link(&abs, &dest);
-        if linked.is_err() {
-            fs::copy(&abs, &dest).map_err(|e| e.to_string())?;
+    let p = media_cache_path(&st, &root_id, &path, ver.as_deref())?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
+/// 网格视图缩略图（0.2.1）：确保媒体缓存条目后，在缓存目录生成/复用
+/// ≤512px JPEG（`<key_hash>.thumb.jpg`），返回绝对路径供 convertFileSrc。
+/// 无法缩放解码（svg/ico/heic 等）时：原文件 ≤8MiB 直接回传缓存原路径交给
+/// 浏览器渲染，否则报错由前端回退类型图标。
+#[tauri::command]
+pub async fn fs_thumb(
+    app: AppHandle,
+    root_id: String,
+    path: String,
+    ver: Option<String>,
+) -> Result<String, String> {
+    let st = state(&app);
+    let src = media_cache_path(&st, &root_id, &path, ver.as_deref())?;
+    let key = cache_key(&root_id, &path, ver.as_deref());
+    match crate::thumb::ensure_thumb(&st, &key, &src) {
+        Ok(t) => Ok(t.to_string_lossy().into_owned()),
+        Err(e) => {
+            if fs::metadata(&src).map(|m| m.len() <= 8 << 20).unwrap_or(false) {
+                Ok(src.to_string_lossy().into_owned())
+            } else {
+                Err(e)
+            }
         }
     }
-    Ok(dest.to_string_lossy().into_owned())
 }

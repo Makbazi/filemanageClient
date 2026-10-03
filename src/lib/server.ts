@@ -152,13 +152,15 @@ export class ServerSource implements DataSource {
     }) as Promise<string>;
   }
 
-  async thumbData(entry: FsEntry): Promise<string | null> {
-    if (entry.kind !== "image" || entry.size > 4 << 20) return null;
+  async thumbPath(entry: FsEntry): Promise<string | null> {
+    // 0.2.1：Rust 生成 ≤512px 缩略图路径（大图/RAW 经媒体缓存后缩放，RAW 取
+    // 内嵌预览；大文件会先把整文件拉入媒体缓存——与眼睛预览共享，看过一次秒出）
     try {
       return (await invoke("srv_thumb", {
         serverId: this.serverId,
         rootId: this.rootId,
         path: entry.path,
+        ver: String(entry.mtime),
       })) as string;
     } catch {
       return null;

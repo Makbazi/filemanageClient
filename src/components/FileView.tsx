@@ -1,6 +1,7 @@
 // 文件列表页：面包屑 + 操作工具栏 + 筛选/排序栏（需求15/16）+
 // 列表/缩略图两种浏览风格（需求14）。
 import { useEffect, useMemo, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import type { FsEntry } from "../lib/types";
 import type { SourceCapabilities } from "../lib/datasource";
 import { fmtSize, fmtTime, dirParts, kindLabel, toMillis } from "../lib/format";
@@ -86,17 +87,31 @@ export default function FileView(p: Props) {
     setKindFilter("");
   }, [p.path, p.rootName, p.isServer]);
 
-  // 网格视图缩略图懒加载（仅图像、限前 60 个）
+  // 网格缩略图懒加载（0.2.1 全量显示）：凡 viewableType==="image"（含相机 RAW）
+  // 都出图——Rust 侧统一生成 ≤512px 缓存缩略图（fs_thumb/srv_thumb），不再受
+  // 旧 4MiB/2MiB data URL 上限约束；大小图与 RAW 无需点眼睛即可见（眼睛预览保留）。
+  // 并发池 3：服务端大文件/RAW 首次会整文件入媒体缓存，限流避免一次拉爆带宽。
   useEffect(() => {
     if (p.viewMode !== "grid") return;
     let cancelled = false;
     const src = api.source();
-    const targets = p.entries.filter((e) => e.kind === "image" && e.size <= 8 << 20).slice(0, 60);
-    targets.forEach(async (e) => {
-      if (thumbs[e.path] !== undefined) return;
-      const d = await src.thumbData(e).catch(() => null);
-      if (!cancelled) setThumbs((prev) => ({ ...prev, [e.path]: d }));
-    });
+    const targets = p.entries.filter((e) => viewableType(e) === "image").slice(0, 60);
+    let i = 0;
+    const worker = async () => {
+      while (!cancelled && i < targets.length) {
+        const e = targets[i++];
+        if (thumbs[e.path] !== undefined) continue;
+        let s: string | null = null;
+        try {
+          const path = await src.thumbPath(e);
+          if (path) s = convertFileSrc(path);
+        } catch {
+          s = null;
+        }
+        if (!cancelled) setThumbs((prev) => ({ ...prev, [e.path]: s }));
+      }
+    };
+    void Promise.all([worker(), worker(), worker()]);
     return () => {
       cancelled = true;
     };
