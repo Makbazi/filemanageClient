@@ -39,4 +39,11 @@ export interface TransferTask {
   /** B/s，0 = 未知。 */
   speed: number;
   message: string;
+  /** 需求41 目录上传：子任务所属组任务 id（有值的任务不出现在 UI 快照，由组行聚合展示）。 */
+  group?: string;
+  /** 需求41：该任务为组聚合行（UI 的 暂停/继续/取消/重试 走组级 API）。 */
+  isGroup?: boolean;
+  /** 需求41：组行已完成（含失败/取消）文件数 与 总文件数。 */
+  files?: number;
+  filesTotal?: number;
 }

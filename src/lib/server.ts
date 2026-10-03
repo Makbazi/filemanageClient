@@ -25,6 +25,31 @@ export async function srvCall<T = unknown>(
   }
 }
 
+/** 服务端是否报"端点不存在"（需求41 mkdirs 兼容退化判定）。
+ * gin NoRoute 信封 {error:"not found: /api/v1/mkdirs"}，Rust api_error 只透传 error 文本；
+ * 非 JSON 响应体时为 "HTTP 404"/"HTTP 405"。新服务端 mkdirs 自身永不返回 404，误判安全。 */
+export function isMissingEndpoint(e: unknown): boolean {
+  const s = String(e);
+  return /not found/i.test(s) || /HTTP (404|405)/.test(s);
+}
+
+/** 需求41：批量建远端目录（服务端 0.2.0 起提供 POST /api/v1/mkdirs，1000 条上限、
+ * 1MB JSON 限内，客户端按 500/批）。旧服务端（<0.2.0）报端点不存在 → 该批退化为
+ * 逐路径 POST /api/v1/mkdir（幂等 MkdirAll 递归，数量受 fs_walk 上限约束，串行可接受）；
+ * 其他错误原样抛出，由调用方决定中止。 */
+export async function serverMkdirs(serverId: string, rootId: string, paths: string[]): Promise<void> {
+  const BATCH = 500;
+  for (let i = 0; i < paths.length; i += BATCH) {
+    const batch = paths.slice(i, i + BATCH);
+    try {
+      await srvCall(serverId, "POST", "/api/v1/mkdirs", { rootId, paths: batch });
+    } catch (e) {
+      if (!isMissingEndpoint(e)) throw e;
+      for (const p of batch) await srvCall(serverId, "POST", "/api/v1/mkdir", { rootId, path: p });
+    }
+  }
+}
+
 interface ServerFileVersion {
   id: number;
   versionNo: number;

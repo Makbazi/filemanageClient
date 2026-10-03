@@ -160,6 +160,78 @@ pub async fn fs_list(app: AppHandle, root_id: String, path: String) -> Result<Ve
     Ok(out)
 }
 
+/// 需求41 目录上传：递归枚举本地目录树（一次性返回，带硬上限）。
+/// relPath 相对被遍历目录、一律正斜杠拼接（Windows 安全）；符号链接（文件与目录）
+/// 不跟随、不上传（防逃逸根/软链成环）；`.fmtrash`（服务端保留名）跳过；
+/// 深度/条目数超限置 truncated=true——前端据此整体拒绝，绝不上传半棵树。
+/// 中途读目录失败 = 整个遍历报错（确定性失败优于静默缺内容；非 UTF8 文件名走
+/// to_string_lossy，与 fs_list 既有口径一致）。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkEntry {
+    pub name: String,
+    pub rel_path: String,
+    pub is_dir: bool,
+    pub size: u64, // 目录为 0
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkResult {
+    pub entries: Vec<WalkEntry>, // 不含被遍历目录自身
+    pub truncated: bool,
+}
+
+const WALK_MAX_ENTRIES: usize = 20_000;
+const WALK_MAX_DEPTH: usize = 64;
+
+#[tauri::command]
+pub async fn fs_walk(app: AppHandle, root_id: String, path: String) -> Result<WalkResult, String> {
+    let st = state(&app);
+    let root = st.root_path(&root_id)?;
+    let abs = resolve_in_root(&root, &path)?;
+    if !abs.is_dir() {
+        return Err(format!("{path} 不是目录"));
+    }
+    let mut out: Vec<WalkEntry> = Vec::new();
+    let mut truncated = false;
+    // 显式栈迭代（不递归——深树无爆栈风险；rel 只由字符串段拼出，不经过 PathBuf 分隔符）
+    let mut stack: Vec<(PathBuf, String, usize)> = vec![(abs, String::new(), 0)];
+    while let Some((dir, prefix, depth)) = stack.pop() {
+        if depth >= WALK_MAX_DEPTH {
+            truncated = true;
+            continue;
+        }
+        let rd = fs::read_dir(&dir).map_err(|e| format!("无法读取目录 {}: {e}", if prefix.is_empty() { path.as_str() } else { &prefix }))?;
+        for de in rd.flatten() {
+            if out.len() >= WALK_MAX_ENTRIES {
+                truncated = true;
+                continue;
+            }
+            let name = de.file_name().to_string_lossy().into_owned();
+            if name == ".fmtrash" {
+                continue;
+            }
+            let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            let ft = match de.file_type() {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                out.push(WalkEntry { name, rel_path: rel.clone(), is_dir: true, size: 0 });
+                stack.push((de.path(), rel, depth + 1));
+            } else {
+                let size = de.metadata().map(|m| m.len()).unwrap_or(0);
+                out.push(WalkEntry { name, rel_path: rel, is_dir: false, size });
+            }
+        }
+    }
+    Ok(WalkResult { entries: out, truncated })
+}
+
 #[tauri::command]
 pub async fn fs_mkdir(app: AppHandle, root_id: String, path: String) -> Result<(), String> {
     let st = state(&app);
