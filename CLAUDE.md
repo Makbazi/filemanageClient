@@ -123,7 +123,18 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.1.5（0.1.1/0.1.2 为构建体系批次）；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+0.1.6（0.1.1/0.1.2 为构建体系批次）；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+**0.1.6（2026-10-03 修复 Windows 本地目录路径误报，数据协议零变更）**：`localfs.rs`
+`resolve_in_root` 双保险清洗循环对 Windows 路径是错的——Windows 组件序列首两项是
+`Prefix("C:")`+`RootDir("\")`，旧代码 `other => clean = other.as_os_str().into()`
+**整体赋值**，`RootDir` 一步把已拼的盘符覆盖掉，产出 `\Users\…`，既不匹配配置根
+`C:\Users\…` 也不匹配 canonicalize 的 `\\?\C:\…`（verbatim 前缀），Windows 上任何
+本地目录连 `rel=""` 都被误判越界（Linux 首组件仅 `/` 故无此症）。现 `Prefix`/`RootDir`
+改为 OsString 原样追加（不可用 `PathBuf::push`——`push` 视 `\` 为绝对路径同样清空
+已推内容），`CurDir`/`Normal` 走 push（修正中段 `.` 同型覆盖丢路径），并新增仅 Windows
+生效的 `canonical_base` 剥离 `\\?\`/`\\?\UNC\` 前缀供脏根比对。安全语义零放宽：`..`/NUL
+仍逐段拒绝、词法包含双保险仍生效，仅纠正误杀。本地模式路径契约不变（相对路径一律正斜杠、
+经 `resolve_in_root` 进根），无新增 Rust command、无配置结构变更。
 **0.1.5（2026-10-02 设置页"关于"版本信息，数据协议零变更）**：设置界面新增第 7 个页签**"关于"**——展示应用名、客户端版本号、Tauri 框架版本与配套服务端兼容（静态文案，改兼容矩阵须同步该处），并在 `.page-head` 右侧常驻版本徽标（任何页签可见，可选中复制便于报障）。版本一律经 `@tauri-apps/api/app` 的 `getName/getVersion/getTauriVersion` **运行时**取得，**禁止改成 import package.json 或 vite define 常量**：`build.sh -V` 只经 `tauri --config` 注入 `version`、不改三处版本源文件，唯有运行时元数据能与实际产物版本一致。调用逐项 `catch` 回落（非 Tauri 运行时显示"未知"），effect 用 `cancelled` 标记防重挂回写；权限无需变更（`core:default` ⊇ `core:app:default` 含 allow-version/name/tauri-version）。新增样式只用主题变量，未引入 `backdrop-filter`/`color-mix`，故 Windows(WebView2) 与 Linux(webkitgtk) 观感一致。
 **0.1.4（2026-10-02 UI 修复/改版，数据协议零变更）**：修复 Windows 下设置页内"添加服务端"子对话框被设置卡片遮挡看不见的问题（需求1）——根因是嵌套 `Modal` 的遮罩渲染在父对话框 DOM 内，父 `.modal-mask` 的 `backdrop-filter` 为 fixed 后代建立包含块/层叠上下文、再被 `.modal-body` 的 `overflow` 裁剪；`Modals.tsx` 改为 `createPortal` 把遮罩统一挂到 `document.body`（所有对话框——含分享/版本历史内嵌确认框——一律正确分层，后开必在上）。同时设置界面由浮动模态卡片改为**主区整页视图并保持左侧导航**（需求2）：`View` 联合新增 `settings`，`<main>` 内渲染 `<Settings>`（复用 `.page`、内容居中限宽），Topbar 照常可见；Dialog 联合删除 `settings` 分支，App 以 `openSettings(tab?)`+`settingsTab` 统一进入（侧栏"设置/用户"、AIView、无本地目录回落、登录 `from:"settings"` 回跳账户页签均走它），Esc 离开回文件页，位置恢复不记录设置视图。侧栏折叠按钮移至**左上角**：展开态在 brand 行首位（原右侧），折叠态小标签贴窗口左上角（原整列垂直居中）。页签内容与保存链路不变。
 **0.1.3（2026-10-02 修复，数据协议零变更）**：服务端地址缺协议头归一——`baseUrl` 为裸

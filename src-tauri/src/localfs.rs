@@ -52,21 +52,46 @@ pub(crate) fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String>
         }
     }
     // 双保险：确保结果仍在根目录内
-    let root_c = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root_c = canonical_base(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
     let mut clean = PathBuf::new();
     for c in p.components() {
         match c {
             Component::ParentDir => {
                 clean.pop();
             }
-            Component::Normal(s) => clean.push(s),
-            other => clean = other.as_os_str().into(),
+            // Windows 盘符前缀（C:）与根分隔符（\）必须直接拼接：
+            // 整体赋值会丢盘符，push 又会把 "\" 当绝对路径清空已有内容
+            Component::Prefix(_) | Component::RootDir => {
+                let mut raw = clean.as_os_str().to_os_string();
+                raw.push(c.as_os_str());
+                clean = PathBuf::from(raw);
+            }
+            other => clean.push(other.as_os_str()),
         }
     }
     if !clean.starts_with(&root_c) && !clean.starts_with(root) {
         return Err("路径不允许越出所管理的目录".into());
     }
     Ok(p)
+}
+
+/// Windows 上 canonicalize 返回 \\?\ 前缀的 verbatim 路径，与配置中的普通
+/// 盘符路径做 starts_with 比对前须归一（非 Windows 为恒等变换）。
+#[cfg(windows)]
+fn canonical_base(p: PathBuf) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy().into_owned();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p
+    }
+}
+
+#[cfg(not(windows))]
+fn canonical_base(p: PathBuf) -> PathBuf {
+    p
 }
 
 pub(crate) fn kind_of(name: &str, is_dir: bool) -> String {
