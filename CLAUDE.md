@@ -20,10 +20,12 @@ src/App.tsx            根组件：状态编排、对话框调度（Dialog 判�
 src/lib/
   datasource.ts        DataSource 接口（唯一数据访问契约）
   local.ts             本地实现（invoke fs_* 命令）
-  server.ts            服务端实现（srv_call + srv_* 传输命令）
+  server.ts            服务端实现（srv_call + srv_* 传输命令；0.2.0 serverMkdirs 批量建目录+旧服务端退化逐个 mkdir）
   api.ts               配置单例(loadConfig/saveConfig/active) + source() 工厂 + 分享/ACL/AI 辅助
   transfer.ts          任务注册表（入队/暂停/续传/重试 + "fm-transfer" 事件归并，
-                       未入队 transferId 首个事件自动注册为展示任务）+ 订阅
+                       未入队 transferId 首个事件自动注册为展示任务）+ 订阅；
+                       0.2.0 目录上传组任务（enqueueGroup 子任务不进 order/并发池 3/
+                       组级 pause-resume-cancel-retry/rowActions 统一选路）
   transtypes.ts        TransferTask/TransferStatus 共享契约（状态串 = Rust 事件）
   theme.ts             THEMES 注册 + applyTheme(data-theme)
   types.ts format.ts errors.ts(AuthError)
@@ -51,7 +53,7 @@ src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret 的 com
                        localdb.rs(本地元数据 sqlite：ai_descriptions/trash_items/file_versions/
                                   analysis_tasks；open_and_migrate 幂等迁移 user_version；
                                   旧 *.json 首次启动自动导入后改名 *.imported)
-                       localfs.rs(防逃逸 fs_* + 本地版本库 + fs_import/export +
+                       localfs.rs(防逃逸 fs_* + 本地版本库 + fs_import/export + fs_walk(0.2.0 目录树枚举，需求41) +
                                   fs_media_cache(0.1.7 起带可选 ver 版本串入缓存键))
                        serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache(同 ver)/preview_data/thumb + transfer_cancel)
                        ai.rs(本地 AI)
@@ -104,6 +106,11 @@ cd src-tauri && cargo check
    任务 id=transferId（`uid()`），进度经 `fm-transfer` 事件（未入队 id 自动注册为
    展示任务）；取消/暂停用 `transfer_cancel(pause)`；上传覆盖的 BaseHash 在任务
    执行时重新 stat 获取（乐观锁，需求3；新文件断言 `"-"`）。
+   **0.2.0 需求41 目录上传**：整树枚举走 `fs_walk`（符号链接/`.fmtrash` 跳过，
+   上限内整体拒绝），远端骨架走 `POST /api/v1/mkdirs`（旧服务端自动退化逐个
+   `mkdir`），文件走 `transfer.enqueueGroup` 组任务——子任务只注册不进 UI 快照、
+   并发池限流、一条组行聚合进度，暂停/继续/取消/重试为组级（冲突子任务组重试
+   按覆盖语义）；UI 不得绕过 `rowActions` 直接调单任务 API。
 6. **配置**：AppConfig 变更必须给默认值（config.rs serde default + api.ts normalize），
    兼容旧 config.json。
 7. **主题**：颜色一律用 CSS 变量（themes.css），组件样式禁止硬编码色值；
@@ -134,7 +141,8 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.1.7（0.1.1/0.1.2 为构建体系批次）；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.0）** / 0.1.x / 0.7.x / 0.6.x（配旧服务端目录上传自动退化逐个 mkdir，其余数据协议零变更）。
+**0.2.0（2026-10-03 目录上传，需求41；依赖 Server 0.2.0 加性端点 `POST /api/v1/mkdirs`，配旧服务端自动退化逐个 `mkdir`）**：本地模式右键目录 →"上传目录到远程…"——Rust `fs_walk` 递归枚举（符号链接/`.fmtrash` 跳过，深度 64/条目 20000 上限，超限整体拒绝绝不传半棵树）→ `serverMkdirs` 一次建好远端目录骨架（含空目录）→ 逐文件经并发池（3）入组队列；传输 UI **整目录聚合为一条组行**（总字节进度 + `done/total 个文件`，暂停/继续/取消/重试整组粒度；冲突文件组重试按覆盖语义重跑，服务端覆盖前先存版本，需求3）。`UploadToDialog` 新增 `isDir`；transfer.ts 新增 `enqueueGroup/settle/pump/组级 API/rowActions`（子任务只进注册表不进 order，UI 快照天然只见组行；`removeTask/clearFinished` 级联清理子任务）；`watchGroup` 整组终态才一次汇总通知+刷新。已知限制：组内子任务暂不可展开（`getGroupChildren` API 已留）、20000 条硬上限、非 UTF8 文件名沿用 `fs_list` lossy 口径。
 **0.1.7（2026-10-03 查看/预览分离+大图片查看+查看器全屏，数据协议零变更）**：双击**可预览类型**
 （`viewableType`：image/video/audio/pdf/文本扩展名）→ 新建 `FileViewer` 主区覆盖层就地显示
 （`<main>` 加 `position:relative`，`.viewer` absolute 盖住列表与顶栏——**不顶替 FileView 插槽**，

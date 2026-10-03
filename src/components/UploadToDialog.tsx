@@ -1,5 +1,6 @@
 // "上传到远程"对话框（0.6.0 需求7）：勾选一个/多个服务端，文件上传到各自的分配根目录；
 // 未登录或无可见目录的服务端不可勾选；多根服务端可选目标目录。提交后由传输队列执行。
+// 0.2.0 需求41：isDir=true 时为目录上传——整棵目录树重建到所选根下的同名子目录（<目录名>/…）。
 import { useEffect, useState } from "react";
 import type { AppConfig, ServerRoot } from "../lib/types";
 import * as api from "../lib/api";
@@ -9,6 +10,7 @@ import { IconUpload } from "./icons";
 interface Props {
   cfg: AppConfig;
   fileName: string;
+  isDir?: boolean;
   onCancel(): void;
   onSubmit(targets: { serverId: string; rootId: string }[]): void;
 }
@@ -56,7 +58,7 @@ export default function UploadToDialog(p: Props) {
   };
 
   return (
-    <Modal title={`上传到远程 · ${p.fileName}`} onClose={p.onCancel} width={460}>
+    <Modal title={`${p.isDir ? "上传目录到远程" : "上传到远程"} · ${p.fileName}`} onClose={p.onCancel} width={460}>
       {p.cfg.servers.length === 0 ? (
         <div className="dim tip">尚未配置服务端，请先在设置 → 服务端中添加。</div>
       ) : (
@@ -91,13 +93,17 @@ export default function UploadToDialog(p: Props) {
           );
         })
       )}
-      <div className="dim tip">文件将上传到所选服务端的根目录（同名冲突可在"传输"界面用覆盖重试）。</div>
+      <div className="dim tip">
+        {p.isDir
+          ? `目录结构将整树复制到所选服务端的根目录下（${p.fileName}/…，含空目录；符号链接不上传；同名文件冲突可在"传输"界面整组重试覆盖）。`
+          : "文件将上传到所选服务端的根目录（同名冲突可在\"传输\"界面用覆盖重试）。"}
+      </div>
       <div className="modal-actions">
         <button className="btn ghost" onClick={p.onCancel}>
           取消
         </button>
         <button className="btn primary" disabled={!picked.size} onClick={submit}>
-          <IconUpload size={14} /> 上传到 {picked.size} 个服务端
+          <IconUpload size={14} /> 上传{p.isDir ? "目录" : ""}到 {picked.size} 个服务端
         </button>
       </div>
     </Modal>

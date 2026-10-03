@@ -61,6 +61,7 @@ pub fn run() {
             save_config,
             // 本地目录
             localfs::fs_list,
+            localfs::fs_walk,
             localfs::fs_mkdir,
             localfs::fs_rename,
             localfs::fs_move,

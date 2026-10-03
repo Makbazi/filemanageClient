@@ -147,3 +147,24 @@ export class LocalSource implements DataSource {
     return invoke("fs_versions_remove", { versionId: String(versionId) });
   }
 }
+
+// ---------- 需求41：目录上传的本地树枚举 ----------
+
+export interface WalkEntry {
+  name: string;
+  /** 相对被遍历目录，正斜杠。 */
+  relPath: string;
+  isDir: boolean;
+  size: number;
+}
+
+export interface WalkResult {
+  entries: WalkEntry[];
+  /** 超深度/条目上限（Rust 侧 64 层/20000 条）——调用方应整体拒绝，不传半棵树。 */
+  truncated: boolean;
+}
+
+/** 递归枚举本地目录（fs_walk；本地专属辅助，不扩 DataSource 契约，与 joinLocalAbs 同类）。 */
+export function walkLocalDir(rootId: string, path: string): Promise<WalkResult> {
+  return invoke("fs_walk", { rootId, path }) as Promise<WalkResult>;
+}

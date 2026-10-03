@@ -8,7 +8,9 @@ import type { ActiveConf, AppConfig, FsEntry, SearchHit, ServerRoot, TrashItem }
 import { uid } from "./lib/types";
 import * as api from "./lib/api";
 import { AuthError } from "./lib/api";
-import { initTransfers, enqueue, subscribe } from "./lib/transfer";
+import { initTransfers, enqueue, subscribe, enqueueGroup } from "./lib/transfer";
+import { walkLocalDir, type WalkResult } from "./lib/local";
+import { serverMkdirs } from "./lib/server";
 import { applyTheme } from "./lib/theme";
 import { joinPath, parentOf } from "./lib/format";
 import { viewableType } from "./lib/preview";
@@ -254,6 +256,30 @@ export default function App() {
         } else if (t.status === "error") {
           unsub();
           notify(`${label}失败：${t.message || "未知错误"}（可在传输面板处理）`);
+        } else if (t.status === "cancelled") {
+          unsub();
+        }
+      });
+    },
+    [notify]
+  );
+
+  /** 需求41：盯一个目录上传组行到终态——整组结束才一次汇总通知 + 刷新。 */
+  const watchGroup = useCallback(
+    (gid: string, label: string) => {
+      const unsub = subscribe((list) => {
+        const t = list.find((x) => x.id === gid);
+        if (!t) {
+          unsub();
+          return;
+        }
+        if (t.status === "done") {
+          unsub();
+          notify(`目录上传完成：${label}（${t.files}/${t.filesTotal} 个文件）`);
+          void refreshRef.current();
+        } else if (t.status === "error") {
+          unsub();
+          notify(`目录上传结束但有失败：${t.message}（可在传输面板处理）`);
         } else if (t.status === "cancelled") {
           unsub();
         }
@@ -615,6 +641,62 @@ export default function App() {
       watchTransfer(id, "上传");
     }
     notify(`已加入上传队列：${entry.name} → ${targets.length} 个服务端（见"传输"界面）`);
+  }
+
+  /** 需求41：右键本地目录 → 整树上传。fs_walk 枚举 → mkdirs 批量建目录骨架（含空目录，
+   *  旧服务端自动退化逐个 mkdir）→ 逐文件入组队列（并发池限流，传输界面聚合一条）。 */
+  async function uploadDirToServers(entry: FsEntry, targets: { serverId: string; rootId: string }[]) {
+    setDialog({ kind: "none" });
+    let walk: WalkResult;
+    try {
+      walk = await walkLocalDir(api.active().rootId, entry.path);
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    if (walk.truncated) {
+      setError("目录过大（超过 20000 个条目或 64 层深度），已拒绝上传，请拆分后分批进行");
+      return;
+    }
+    let dirAbs = "";
+    try {
+      dirAbs = api.joinLocalAbs(entry.path);
+    } catch (e) {
+      notify(String(e));
+      return;
+    }
+    const dirs = [entry.name, ...walk.entries.filter((x) => x.isDir).map((x) => `${entry.name}/${x.relPath}`)];
+    const files = walk.entries.filter((x) => !x.isDir);
+    for (const t of targets) {
+      try {
+        await serverMkdirs(t.serverId, t.rootId, dirs);
+      } catch (e) {
+        setError(`建远端目录失败：${String(e)}`);
+        continue; // 该服务端整体跳过（文件传上去也会因权限/jail 失败），其余照常
+      }
+      if (files.length === 0) {
+        notify(`已在所选服务端创建空目录 ${entry.name}`);
+        continue;
+      }
+      const gid = uid();
+      enqueueGroup({
+        id: gid,
+        label: `目录 ${entry.name}`,
+        serverId: t.serverId,
+        rootId: t.rootId,
+        children: files.map((f) => ({
+          name: f.name,
+          remotePath: `${entry.name}/${f.relPath}`, // 相对远程根；落在 <根>/<目录名>/…
+          localPath: `${dirAbs}/${f.relPath}`,
+          size: f.size,
+          baseHash: "-", // 与单文件流一致：断言新文件；已存在→冲突 error，组"重试"走覆盖
+        })),
+      });
+      watchGroup(gid, entry.name);
+    }
+    if (files.length > 0) {
+      notify(`已加入目录上传队列：${entry.name}（${files.length} 个文件）→ ${targets.length} 个服务端（见"传输"界面）`);
+    }
   }
 
   function rename(e: FsEntry) {
@@ -981,8 +1063,11 @@ export default function App() {
         <UploadToDialog
           cfg={cfg}
           fileName={dialog.entry.name}
+          isDir={dialog.entry.isDir}
           onCancel={() => setDialog({ kind: "none" })}
-          onSubmit={(targets) => uploadToServers(dialog.entry, targets)}
+          onSubmit={(targets) =>
+            dialog.entry.isDir ? uploadDirToServers(dialog.entry, targets) : uploadToServers(dialog.entry, targets)
+          }
         />
       )}
 
@@ -1002,10 +1087,8 @@ export default function App() {
                     ]
                   : [{ label: "预览", icon: <IconEye size={13} />, onSelect: () => previewEntry(ctx.entry) }]),
               {
-                label: "上传到远程…",
+                label: ctx.entry.isDir ? "上传目录到远程…" : "上传到远程…",
                 icon: <IconUpload size={13} />,
-                disabled: ctx.entry.isDir,
-                hint: "目录上传暂不支持，请进入目录选择文件",
                 onSelect: () => setDialog({ kind: "uploadTo", entry: ctx.entry }),
               },
             ] as CtxItem[]

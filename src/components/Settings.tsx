@@ -685,7 +685,7 @@ function AboutTab(p: { info: AppInfo }) {
       </div>
       <div className="list-row">
         <span className="dim">配套服务端</span>
-        <span className="about-val">0.1.x（推荐，当前 0.1.1）· 0.7.x / 0.6.x / 0.5.x 可用</span>
+        <span className="about-val">0.2.x（推荐，当前 0.2.0）· 0.1.x / 0.7.x / 0.6.x / 0.5.x 可用</span>
       </div>
       <p className="dim tip">
         版本号读自安装包自身元数据：构建脚本以 -V 指定产物版本时，这里显示的就是该注入值（不改动工程版本源文件）。
