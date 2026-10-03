@@ -15,7 +15,8 @@ Tauri 2 + React 19 + TS 桌面客户端。两种数据来源统一在 `DataSourc
 ## 目录结构
 
 ```
-src/App.tsx            根组件：状态编排、对话框调度（Dialog 判别联合）、位置恢复
+src/App.tsx            根组件：状态编排、对话框调度（Dialog 判别联合）、查看覆盖层
+                       （viewing 状态，0.1.7）、位置恢复
 src/lib/
   datasource.ts        DataSource 接口（唯一数据访问契约）
   local.ts             本地实现（invoke fs_* 命令）
@@ -26,9 +27,11 @@ src/lib/
   transtypes.ts        TransferTask/TransferStatus 共享契约（状态串 = Rust 事件）
   theme.ts             THEMES 注册 + applyTheme(data-theme)
   types.ts format.ts errors.ts(AuthError)
+  preview.ts           viewableType 查看/预览统一类型判定 + 文本解码
+                       （App/FileView/FileGrid/SearchView/FileViewer/PreviewModal 共享）
 src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView TransfersView
-                       AIView PreviewModal ShareDialog AclDialog VersionsDialog TransferPanel
-                       ContextMenu UploadToDialog Settings Modals icons
+                       AIView PreviewModal FileViewer ShareDialog AclDialog VersionsDialog
+                       TransferPanel ContextMenu UploadToDialog Settings Modals icons
                        （0.1.4：Settings 为主区整页视图（View 含 settings，侧栏保持
                        可见；折叠按钮在左上角）；Modals 的遮罩经 createPortal 挂
                        body，嵌套对话框恒在上）
@@ -48,8 +51,9 @@ src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret 的 com
                        localdb.rs(本地元数据 sqlite：ai_descriptions/trash_items/file_versions/
                                   analysis_tasks；open_and_migrate 幂等迁移 user_version；
                                   旧 *.json 首次启动自动导入后改名 *.imported)
-                       localfs.rs(防逃逸 fs_* + 本地版本库 + fs_import/export + fs_media_cache)
-                       serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache/preview_data/thumb + transfer_cancel)
+                       localfs.rs(防逃逸 fs_* + 本地版本库 + fs_import/export +
+                                  fs_media_cache(0.1.7 起带可选 ver 版本串入缓存键))
+                       serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache(同 ver)/preview_data/thumb + transfer_cancel)
                        ai.rs(本地 AI)
 ```
 
@@ -104,8 +108,15 @@ cd src-tauri && cargo check
    兼容旧 config.json。
 7. **主题**：颜色一律用 CSS 变量（themes.css），组件样式禁止硬编码色值；
    新主题 = themes.css 增加一个 `[data-theme=...]` 块 + theme.ts THEMES 注册。
-8. **预览**：视频/音频/PDF 必须经媒体缓存 + `convertFileSrc`（asset 协议 scope
-   只授权应用缓存目录）；图片/文本用 data URL。
+8. **预览/查看（0.1.7 契约）**：图片/视频/音频/PDF 一律经媒体缓存 + `convertFileSrc`
+   （asset 协议 scope 只授权应用缓存目录；无大小上限——大图片可看；缓存键必须并入
+   `ver`＝entry.mtime 串，防覆盖后 exists 短路命中旧内容）；文本用 data URL（仍 ≤8MiB）。
+   预览＝PreviewModal 缩放弹窗（"缩略图"观感，入口＝眼睛/角标/右键"预览"）；
+   查看＝FileViewer 主区覆盖层（入口＝双击/右键"查看"，双击图片/Esc/X 关闭，
+   全屏＝窗口 `setFullscreen`＋CSS 覆盖层，**禁用 DOM requestFullscreen**——
+   webkitgtk 支持参差违背双引擎一致性）。类型判定必须走 `lib/preview.ts`
+   `viewableType`，不得与弹窗支持集分叉。层叠契约：`.modal-mask` 100 >
+   `.viewer-fs` 90 > `.viewer` 80 > 页面内容（401 登录框恒在查看之上）。
 9. **版本号三处同步**（需求19），发版时更新 CHANGELOG 兼容矩阵（需求20）。
 10. 编译验证：`npm run build` + `cargo check` 通过即可（需求29，不写测试）；
     **不做 git 提交/分支/tag**（需求30）。
@@ -123,7 +134,22 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.1.6（0.1.1/0.1.2 为构建体系批次）；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+0.1.7（0.1.1/0.1.2 为构建体系批次）；配套 filemanageServer **0.1.x（推荐；当前 0.1.1）** / 0.7.x / 0.6.x。
+**0.1.7（2026-10-03 查看/预览分离+大图片查看+查看器全屏，数据协议零变更）**：双击**可预览类型**
+（`viewableType`：image/video/audio/pdf/文本扩展名）→ 新建 `FileViewer` 主区覆盖层就地显示
+（`<main>` 加 `position:relative`，`.viewer` absolute 盖住列表与顶栏——**不顶替 FileView 插槽**，
+其下筛选/选中/缩略图状态保留；切 view/path/activeSig 自动收起，依赖仍是稳定字符串）。
+**大图片可看的根因**：图片取字节从 `previewData`（fs/srv 双侧 8MiB data URL 硬限）切到
+`mediaCache`+`convertFileSrc`（预览弹窗同步切，两侧共享缓存）——服务端仍走既有
+`/api/v1/preview` 流式下载（同端点同权限，**Server 零改动、匿名语义不变**）、本地 `fs_media_cache`
+硬链接无上限；两命令新增可选 `ver` 参数（前端传 `String(entry.mtime)` 并入哈希键）防覆盖后
+exists 短路命中旧内容，接口签名不变。入口分离：`openEntry`（双击/右键"查看"）vs
+`previewEntry`（眼睛/角标/搜索页"预览"按钮/右键"预览"），`FileView/FileGrid/SearchView`
+各加 `onPreview` prop。全屏＝`getCurrentWindow().setFullscreen`（capabilities 新增
+`core:window:allow-set-fullscreen` 一行；失败 try/catch 退化 CSS 覆盖层 `.viewer-fs`；
+`fsApplied` ref 确保只撤销查看器自己置的全屏，不抢 WM 状态）；双击图片关闭查看，
+Esc 先退全屏再关查看。已知边界：文本 >8MiB 仍报过大；服务端图片查看产生瞬时 "media-"
+传输展示行（视频预览先例）；`$APPCACHE/media` 无淘汰策略（既有缺口，后续项）。
 **0.1.6（2026-10-03 修复 Windows 本地目录路径误报，数据协议零变更）**：`localfs.rs`
 `resolve_in_root` 双保险清洗循环对 Windows 路径是错的——Windows 组件序列首两项是
 `Prefix("C:")`+`RootDir("\")`，旧代码 `other => clean = other.as_os_str().into()`

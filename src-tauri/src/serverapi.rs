@@ -814,18 +814,24 @@ fn simple_hash(s: &str) -> u64 {
 }
 
 /// 把服务端文件拉到本地媒体缓存目录（asset 协议已授权），返回缓存绝对路径。
-/// 供 <video>/<audio>/<embed> 直接播放（asset 协议支持 Range）。
+/// 供 <img>/<video>/<audio>/<embed> 直接加载（asset 协议支持 Range）。
+/// 0.1.7：可选 ver（前端传 entry.mtime 串）并入缓存键，防覆盖后 exists 命中旧内容。
 #[tauri::command]
 pub async fn srv_media_cache(
     app: AppHandle,
     server_id: String,
     root_id: String,
     path: String,
+    ver: Option<String>,
 ) -> Result<String, String> {
     let st = state(&app);
     let srv = st.server(&server_id)?;
     let ext = path.rsplit('.').next().unwrap_or("bin");
-    let cache_name = format!("{:x}.{}", simple_hash(&format!("{server_id}/{root_id}/{path}")), ext);
+    let key = match ver.as_deref() {
+        Some(v) => format!("{server_id}/{root_id}/{path}@{v}"),
+        None => format!("{server_id}/{root_id}/{path}"),
+    };
+    let cache_name = format!("{:x}.{}", simple_hash(&key), ext);
     let dest = st.media_cache_dir().join(&cache_name);
     let dest_s = dest.to_string_lossy().to_string();
     if dest.exists() {

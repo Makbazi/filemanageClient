@@ -719,8 +719,16 @@ fn cache_hash(s: &str) -> u64 {
 
 /// 把本地根内文件硬链接（或复制）到媒体缓存目录，返回缓存绝对路径。
 /// asset 协议仅授权缓存目录，避免放开任意路径。
+/// 0.1.7：可选 ver（前端传 entry.mtime 串）并入缓存键——图片预览/查看也走
+/// 本通道后，键只含路径会在覆盖写后被 dest.exists() 命中旧内容（data URL
+/// 时代无此问题）；带版本串则自动重拉。
 #[tauri::command]
-pub async fn fs_media_cache(app: AppHandle, root_id: String, path: String) -> Result<String, String> {
+pub async fn fs_media_cache(
+    app: AppHandle,
+    root_id: String,
+    path: String,
+    ver: Option<String>,
+) -> Result<String, String> {
     let st = state(&app);
     let root = st.root_path(&root_id)?;
     let abs = resolve_in_root(&root, &path)?;
@@ -728,7 +736,11 @@ pub async fn fs_media_cache(app: AppHandle, root_id: String, path: String) -> Re
         return Err("不是文件".into());
     }
     let ext = path.rsplit('.').next().unwrap_or("bin");
-    let name = format!("{:x}.{}", cache_hash(&format!("{root_id}/{path}")), ext);
+    let key = match ver.as_deref() {
+        Some(v) => format!("{root_id}/{path}@{v}"),
+        None => format!("{root_id}/{path}"),
+    };
+    let name = format!("{:x}.{}", cache_hash(&key), ext);
     let dest = st.media_cache_dir().join(&name);
     if !dest.exists() {
         let linked = fs::hard_link(&abs, &dest);
