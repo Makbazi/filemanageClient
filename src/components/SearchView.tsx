@@ -6,7 +6,10 @@ import * as api from "../lib/api";
 import { kindIcon, IconSearch } from "./icons";
 
 interface Props {
+  /** 双击=查看（0.1.7：可预览类型主区内联覆盖显示，搜索结果列表状态保留） */
   onOpen(e: FsEntry): void;
+  /** "预览"按钮=弹窗缩略式 */
+  onPreview(e: FsEntry): void;
   /** 定位到文件所在目录 */
   onLocate(e: FsEntry): void;
 }
@@ -146,7 +149,7 @@ export default function SearchView(p: Props) {
                           定位
                         </button>
                         {!e.isDir && (
-                          <button className="btn small" onClick={() => p.onOpen(e)}>
+                          <button className="btn small" onClick={() => p.onPreview(e)}>
                             预览
                           </button>
                         )}

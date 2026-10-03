@@ -1,26 +1,14 @@
-// 文件预览（需求11）：图片/文本内联 data URL；视频/音频/PDF 经媒体缓存 +
-// asset 协议播放（支持拖动进度）；其余类型提示下载。
+// 文件预览（需求11；0.1.7 查看/预览分离）：预览=本弹窗（缩放式"缩略图"观感），
+// 图片/视频/音频/PDF 统一经媒体缓存 + asset 协议（无大小限制，大图片可预览）；
+// 文本 data URL（≤8MiB）；其余类型提示下载。双击可预览类型在主区全屏查看（FileViewer）。
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { FsEntry } from "../lib/types";
 import * as api from "../lib/api";
 import { fmtSize } from "../lib/format";
+import { TEXT_EXT, extOf, b64ToText } from "../lib/preview";
 import { Modal } from "./Modals";
 import { IconDownload } from "./icons";
-
-const TEXT_EXT = ["txt", "md", "log", "json", "yaml", "yml", "toml", "ini", "conf", "csv",
-  "go", "py", "js", "ts", "tsx", "jsx", "rs", "java", "c", "cpp", "h", "css", "html", "sh", "sql", "xml"];
-
-function extOf(name: string) {
-  const i = name.lastIndexOf(".");
-  return i < 0 ? "" : name.slice(i + 1).toLowerCase();
-}
-
-function b64ToText(dataUrl: string): string {
-  const b = atob(dataUrl.split(",")[1] ?? "");
-  const bytes = Uint8Array.from(b, (c) => c.charCodeAt(0));
-  return new TextDecoder("utf-8").decode(bytes);
-}
 
 interface Props {
   entry: FsEntry;
@@ -46,10 +34,11 @@ export default function PreviewModal(p: Props) {
       setBusy(true);
       setErr("");
       try {
-        if (e.kind === "image" || isText) {
+        if (isText) {
           const d = await src.previewData(e);
           if (!cancelled) setDataUrl(d);
-        } else if (isMedia || isPdf) {
+        } else if (e.kind === "image" || isMedia || isPdf) {
+          // 0.1.7：图像改走缓存通道（fs/srv_media_cache 无大小上限），大图预览不再报"文件过大"
           const path = await src.mediaCache(e);
           if (!cancelled) setMediaUrl(convertFileSrc(path));
         }
@@ -76,10 +65,8 @@ export default function PreviewModal(p: Props) {
           </div>
         )}
         {err && <div className="error-bar">{err}</div>}
-        {!busy && !err && dataUrl.startsWith("data:image") && <img src={dataUrl} alt={e.name} />}
-        {!busy && !err && dataUrl && !dataUrl.startsWith("data:image") && (
-          <pre className="preview-text">{b64ToText(dataUrl)}</pre>
-        )}
+        {!busy && !err && mediaUrl && e.kind === "image" && <img src={mediaUrl} alt={e.name} />}
+        {!busy && !err && dataUrl && <pre className="preview-text">{b64ToText(dataUrl)}</pre>}
         {!busy && !err && mediaUrl && e.kind === "video" && (
           <video className="preview-video" src={mediaUrl} controls autoPlay />
         )}

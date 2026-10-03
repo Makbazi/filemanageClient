@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FsEntry } from "../lib/types";
 import type { SourceCapabilities } from "../lib/datasource";
 import { fmtSize, fmtTime, dirParts, kindLabel, toMillis } from "../lib/format";
+import { viewableType } from "../lib/preview";
 import * as api from "../lib/api";
 import {
   kindIcon,
@@ -45,7 +46,10 @@ interface Props {
   onViewMode(m: "list" | "grid"): void;
   groupByKind: boolean;
   onGroupByKind(v: boolean): void;
+  /** 双击=查看（0.1.7：可预览类型主区内联全屏可看；目录进入；其余弹窗） */
   onOpen(entry: FsEntry): void;
+  /** 预览按钮：弹窗缩略式（0.1.7 与查看分离） */
+  onPreview(entry: FsEntry): void;
   onBreadcrumb(path: string): void;
   onRefresh(): void;
   onMkdir(): void;
@@ -150,7 +154,7 @@ export default function FileView(p: Props) {
         </button>
       )}
       {!e.isDir && (
-        <button className="mini" title="预览" onClick={(ev) => { ev.stopPropagation(); p.onOpen(e); }}>
+        <button className="mini" title="预览" onClick={(ev) => { ev.stopPropagation(); p.onPreview(e); }}>
           <IconEye size={14} />
         </button>
       )}
@@ -209,7 +213,13 @@ export default function FileView(p: Props) {
               ev.preventDefault();
               p.onCtxEntry(e, ev.clientX, ev.clientY);
             }}
-            title={e.isDir ? "双击打开；Ctrl+单击多选；右键菜单" : "双击预览；Ctrl+单击多选；右键菜单"}
+            title={
+              e.isDir
+                ? "双击打开；Ctrl+单击多选；右键菜单"
+                : viewableType(e)
+                  ? "双击查看；Ctrl+单击多选；右键菜单"
+                  : "双击预览；Ctrl+单击多选；右键菜单"
+            }
           >
             <td className="cell-name">
               <span className={`ficon k-${e.kind}`}>{kindIcon(e.kind)}</span>
@@ -355,7 +365,15 @@ export default function FileView(p: Props) {
                   {kindLabel[kind] ?? kind} · {list.length}
                 </div>
                 {p.viewMode === "grid" ? (
-                  <FileGrid entries={list} sel={sel} thumbs={thumbs} onToggle={toggle} onOpen={p.onOpen} onCtx={p.onCtxEntry} />
+                  <FileGrid
+                    entries={list}
+                    sel={sel}
+                    thumbs={thumbs}
+                    onToggle={toggle}
+                    onOpen={p.onOpen}
+                    onPreview={p.onPreview}
+                    onCtx={p.onCtxEntry}
+                  />
                 ) : (
                   listBody(list)
                 )}
@@ -364,7 +382,15 @@ export default function FileView(p: Props) {
           </div>
         ) : p.viewMode === "grid" ? (
           <div onClick={(ev) => ev.stopPropagation()}>
-            <FileGrid entries={filtered} sel={sel} thumbs={thumbs} onToggle={toggle} onOpen={p.onOpen} onCtx={p.onCtxEntry} />
+            <FileGrid
+              entries={filtered}
+              sel={sel}
+              thumbs={thumbs}
+              onToggle={toggle}
+              onOpen={p.onOpen}
+              onPreview={p.onPreview}
+              onCtx={p.onCtxEntry}
+            />
           </div>
         ) : (
           listBody(filtered)

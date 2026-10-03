@@ -238,6 +238,16 @@ export const IconEye = (p: P) => (
     <circle cx="12" cy="12" r="3" />
   </Svg>
 );
+export const IconExpand = (p: P) => (
+  <Svg {...p}>
+    <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+  </Svg>
+);
+export const IconCollapse = (p: P) => (
+  <Svg {...p}>
+    <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7" />
+  </Svg>
+);
 export const IconLock = (p: P) => (
   <Svg {...p}>
     <rect x="3" y="11" width="18" height="11" rx="2" />

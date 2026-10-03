@@ -37,9 +37,10 @@ export interface DataSource {
 
   search(f: SearchFilters): Promise<FsEntry[]>;
 
-  /** 图像/文本预览：返回 data URL */
+  /** 文本预览：返回 data URL（0.1.7 起图像不再走本通道——8MiB 上限只适合小文本；大图统一 mediaCache） */
   previewData(entry: FsEntry): Promise<string>;
-  /** 视频/音频/PDF：拉入媒体缓存，返回可被 convertFileSrc 使用的本机路径 */
+  /** 图像/视频/音频/PDF：拉入媒体缓存，返回可被 convertFileSrc 使用的本机路径；
+   *  无大小限制（大图可预览/查看），缓存键含 entry.mtime 版本串防覆盖后陈旧 */
   mediaCache(entry: FsEntry): Promise<string>;
   /** 网格视图缩略图：返回 data URL；不支持/过大返回 null（前端回退图标） */
   thumbData(entry: FsEntry): Promise<string | null>;

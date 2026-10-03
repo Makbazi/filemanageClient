@@ -87,7 +87,12 @@ export class LocalSource implements DataSource {
   }
 
   mediaCache(entry: FsEntry): Promise<string> {
-    return invoke("fs_media_cache", { rootId: this.rootId, path: entry.path }) as Promise<string>;
+    // ver=entry.mtime：缓存键含版本串，覆盖后自动重拉（0.1.7 图片也走本通道）
+    return invoke("fs_media_cache", {
+      rootId: this.rootId,
+      path: entry.path,
+      ver: String(entry.mtime),
+    }) as Promise<string>;
   }
 
   async thumbData(entry: FsEntry): Promise<string | null> {

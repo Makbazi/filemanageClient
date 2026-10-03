@@ -1,6 +1,8 @@
 // 缩略图网格视图（需求14：可选目录浏览风格——按缩略图）。
+// 网格缩略图即"预览"的最低一级；双击卡片=查看（0.1.7，主区内联显示）。
 import type { FsEntry } from "../lib/types";
 import { fmtSize } from "../lib/format";
+import { viewableType } from "../lib/preview";
 import { kindIcon, IconEye } from "./icons";
 
 interface Props {
@@ -9,7 +11,10 @@ interface Props {
   /** path → 缩略图 data URL（null=无缩略图，用类型图标） */
   thumbs: Record<string, string | null>;
   onToggle(e: FsEntry, multi: boolean): void;
+  /** 双击=查看 */
   onOpen(e: FsEntry): void;
+  /** 角标眼睛按钮=预览弹窗 */
+  onPreview(e: FsEntry): void;
   /** 右键菜单（0.6.0 需求7），未提供则保持浏览器默认行为 */
   onCtx?(e: FsEntry, x: number, y: number): void;
 }
@@ -30,10 +35,10 @@ export default function FileGrid(p: Props) {
               ev.preventDefault();
               p.onCtx(e, ev.clientX, ev.clientY);
             }}
-            title={e.isDir ? "双击打开；右键菜单" : "双击预览；右键菜单"}
+            title={e.isDir ? "双击打开；右键菜单" : viewableType(e) ? "双击查看；右键菜单" : "双击预览；右键菜单"}
           >
             {!e.isDir && (
-              <button className="grid-preview-btn" title="预览" onClick={(ev) => { ev.stopPropagation(); p.onOpen(e); }}>
+              <button className="grid-preview-btn" title="预览" onClick={(ev) => { ev.stopPropagation(); p.onPreview(e); }}>
                 <IconEye size={13} />
               </button>
             )}

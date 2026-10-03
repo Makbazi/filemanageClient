@@ -11,6 +11,7 @@ import { AuthError } from "./lib/api";
 import { initTransfers, enqueue, subscribe } from "./lib/transfer";
 import { applyTheme } from "./lib/theme";
 import { joinPath, parentOf } from "./lib/format";
+import { viewableType } from "./lib/preview";
 import Sidebar, { type View } from "./components/Sidebar";
 import Topbar from "./components/Topbar";
 import FileView from "./components/FileView";
@@ -20,13 +21,14 @@ import AIView from "./components/AIView";
 import SearchView from "./components/SearchView";
 import Settings from "./components/Settings";
 import PreviewModal from "./components/PreviewModal";
+import FileViewer from "./components/FileViewer";
 import ShareDialog from "./components/ShareDialog";
 import AclDialog from "./components/AclDialog";
 import VersionsDialog from "./components/VersionsDialog";
 import TransferPanel from "./components/TransferPanel";
 import ContextMenu, { type CtxItem } from "./components/ContextMenu";
 import UploadToDialog from "./components/UploadToDialog";
-import { IconEye, IconUpload } from "./components/icons";
+import { IconEye, IconUpload, IconExpand } from "./components/icons";
 import { Confirm, Modal, Prompt } from "./components/Modals";
 
 type Dialog =
@@ -152,6 +154,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [roots, setRoots] = useState<ServerRoot[]>([]);
   const [dialog, setDialog] = useState<Dialog>({ kind: "none" });
+  // 0.1.7：查看覆盖层（双击可预览类型→主区就地显示；非 Dialog，弹窗仍可在其上叠加）
+  const [viewing, setViewing] = useState<FsEntry | null>(null);
   // 本地文件右键菜单（需求7）
   const [ctx, setCtx] = useState<{ entry: FsEntry; x: number; y: number } | null>(null);
   const [toast, setToast] = useState("");
@@ -337,6 +341,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, path, viewMode, activeSig]);
 
+  // 0.1.7：切换视图/目录/来源时收起查看覆盖层（依赖均为稳定字符串，见上 activeSig 注）
+  useEffect(() => {
+    setViewing(null);
+  }, [view, path, activeSig]);
+
   const setActive = async (a: ActiveConf) => {
     const c = api.getConfig();
     const next = { ...c, active: a };
@@ -405,11 +414,22 @@ export default function App() {
 
   // ---------- 文件操作 ----------
 
+  /** 双击入口（0.1.7 区分查看/预览）：目录→进入；可预览类型→主区"查看"覆盖层
+   * （无大小限制，大图片可看）；其余→预览弹窗（提示下载，同旧行为）。 */
   function openEntry(e: FsEntry) {
     if (e.isDir) {
       setPath(e.path);
       return;
     }
+    if (viewableType(e)) {
+      setViewing(e);
+      return;
+    }
+    previewEntry(e);
+  }
+
+  /** 预览按钮/右键"预览"：缩放式弹窗（"预览是缩略图"语义） */
+  function previewEntry(e: FsEntry) {
     setDialog({ kind: "preview", entry: e });
   }
 
@@ -738,6 +758,7 @@ export default function App() {
             groupByKind={groupByKind}
             onGroupByKind={changeGroupByKind}
             onOpen={openEntry}
+            onPreview={previewEntry}
             onBreadcrumb={setPath}
             onRefresh={refresh}
             onMkdir={() =>
@@ -839,6 +860,7 @@ export default function App() {
         {view === "search" && (
           <SearchView
             onOpen={openEntry}
+            onPreview={previewEntry}
             onLocate={(e) => {
               setView("files");
               setPath(e.path);
@@ -861,6 +883,19 @@ export default function App() {
               await refresh();
             }}
             onLogin={(id) => setDialog({ kind: "login", serverId: id, from: "settings" })}
+          />
+        )}
+
+        {/* 0.1.7：查看覆盖层——盖住主区文件列表（保留其下筛选/选中状态），
+            仅 files/search 视图生效（切视图的清除 effect 之前不闪现） */}
+        {viewing && (view === "files" || view === "search") && (
+          <FileViewer
+            entry={viewing}
+            onExit={() => setViewing(null)}
+            onDownload={(e) => {
+              setViewing(null);
+              void download([e]);
+            }}
           />
         )}
       </main>
@@ -957,7 +992,15 @@ export default function App() {
           y={ctx.y}
           items={
             [
-              { label: ctx.entry.isDir ? "打开" : "预览", icon: <IconEye size={13} />, onSelect: () => openEntry(ctx.entry) },
+              ...(ctx.entry.isDir
+                ? [{ label: "打开", icon: <IconEye size={13} />, onSelect: () => openEntry(ctx.entry) }]
+                : viewableType(ctx.entry)
+                  ? // 0.1.7 查看/预览分离：可预览类型两项都给（查看=主区大图，预览=弹窗小图）
+                    [
+                      { label: "查看", icon: <IconExpand size={13} />, onSelect: () => openEntry(ctx.entry) },
+                      { label: "预览", icon: <IconEye size={13} />, onSelect: () => previewEntry(ctx.entry) },
+                    ]
+                  : [{ label: "预览", icon: <IconEye size={13} />, onSelect: () => previewEntry(ctx.entry) }]),
               {
                 label: "上传到远程…",
                 icon: <IconUpload size={13} />,
