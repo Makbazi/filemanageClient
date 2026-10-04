@@ -6,12 +6,78 @@ mod ai;
 mod config;
 mod localdb;
 mod localfs;
+mod player;
 mod secret;
 mod serverapi;
 mod thumb;
 
 use config::AppConfig;
-use tauri::{AppHandle, Manager};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, WindowEvent};
+
+/// 托盘可用性（0.3.0 需求2）：构建失败（无 AppIndicator 宿主环境等）→ 关闭按钮
+/// 自动退回"退出"行为，绝不把用户关进无窗口的黑盒。
+static TRAY_OK: AtomicBool = AtomicBool::new(false);
+/// 正在主动退出程序（托盘菜单「退出」）：不再按 tray 配置拦截 CloseRequested。
+static QUITTING: AtomicBool = AtomicBool::new(false);
+
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// 系统托盘（需求2）：菜单 = 显示主窗口 / 退出；右键出菜单，左键单击/双击仅唤醒
+/// 已隐藏的窗口（tauri 源码注明 Linux appindicator 不派发点击事件——Linux 上
+/// 恢复窗口的主路径就是菜单项）。图标复用应用默认窗口图标。
+fn build_tray(app: &mut tauri::App) -> Result<(), String> {
+    let icon = app.default_window_icon().cloned().ok_or("无默认窗口图标")?;
+    let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let sep = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+    let quit = PredefinedMenuItem::quit(app, Some("退出 FileManage")).map_err(|e| e.to_string())?;
+    let menu = Menu::with_items(app, &[&show, &sep, &quit]).map_err(|e| e.to_string())?;
+    TrayIconBuilder::with_id("main-tray")
+        .icon(icon)
+        .tooltip("FileManage · 文件管理")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, e| {
+            if e.id() == "show" {
+                show_main(app);
+            } else if e.id() == "quit" {
+                QUITTING.store(true, Ordering::SeqCst);
+                app.exit(0);
+            }
+        })
+        .on_tray_icon_event(|tray, e| {
+            let hit = matches!(
+                e,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } | TrayIconEvent::DoubleClick { .. }
+            );
+            if !hit {
+                return;
+            }
+            // 只负责唤醒（隐藏态恢复），不做左键隐藏——隐藏入口恒为窗口关闭按钮
+            let app = tray.app_handle();
+            if let Some(w) = app.get_webview_window("main") {
+                if !w.is_visible().unwrap_or(true) {
+                    show_main(app);
+                }
+            }
+        })
+        .build(app)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 fn get_config(app: AppHandle) -> AppConfig {
@@ -43,7 +109,15 @@ fn save_config(app: AppHandle, mut config: AppConfig) -> Result<AppConfig, Strin
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // 单实例（0.3.0 需求2 配套）：托盘常驻后重复启动不再开第二个实例，只唤醒已有窗口
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main(app);
+        }));
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -55,7 +129,31 @@ pub fn run() {
             // 本地回收站过期自动清理（0.4.0，需求：30 天，与服务端各自独立；启动时执行一次）
             localfs::purge_expired_trash(&st);
             app.manage(st);
+            // 托盘常驻（需求2）：托盘不可用绝不使启动失败——关闭按钮按配置直接退出
+            match build_tray(app) {
+                Ok(()) => TRAY_OK.store(true, Ordering::SeqCst),
+                Err(e) => eprintln!("托盘不可用（关闭按钮将按配置直接退出）: {e}"),
+            }
             Ok(())
+        })
+        // 关闭按钮(X)拦截（需求2）：closeAction=tray 且托盘可用且非主动退出 →
+        // 阻止关闭并隐藏（先退全屏，避免隐藏态残留全屏）；否则放行，末窗口关闭进程自然退出。
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
+                let to_tray = !QUITTING.load(Ordering::SeqCst)
+                    && TRAY_OK.load(Ordering::SeqCst)
+                    && config::state(window.app_handle()).config().ui.close_action == "tray";
+                if to_tray {
+                    api.prevent_close();
+                    if window.is_fullscreen().unwrap_or(false) {
+                        let _ = window.set_fullscreen(false);
+                    }
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -93,6 +191,9 @@ pub fn run() {
             serverapi::srv_preview_data,
             serverapi::srv_thumb,
             serverapi::transfer_cancel,
+            // 外部播放器（0.3.0 需求1：系统解码失败兜底 / 可配置播放器 / 设置页测试）
+            player::open_media,
+            player::test_player_command,
             // 记住的服务端账户密码（0.6.0 需求3）
             serverapi::cred_take,
             serverapi::cred_forget,

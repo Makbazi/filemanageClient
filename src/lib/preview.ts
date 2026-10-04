@@ -27,6 +27,14 @@ export const RAW_EXT = [
   "mrw", "dcs", "kdc", // Minolta / Kodak
 ];
 
+/** 视频扩展名（0.3.0 需求1；与 Rust localfs kind_of / player.rs VIDEO_EXT 同表）。
+ *  H.264/H.265 常见容器与裸流（hevc/h265/h264/m2ts/mpg…），kind 不改、显示分流一律走
+ *  viewableType（RAW 先例）。有意不含 `ts`——与 TypeScript 源文件冲突（TEXT_EXT/code）。 */
+export const VIDEO_EXT = [
+  "mp4", "m4v", "mkv", "mov", "webm", "avi", "flv", "wmv", "ogv", "ogm",
+  "m2ts", "mts", "mpg", "mpeg", "mpe", "3gp", "vob", "hevc", "h265", "h264",
+];
+
 export function extOf(name: string): string {
   const i = name.lastIndexOf(".");
   return i < 0 ? "" : name.slice(i + 1).toLowerCase();
@@ -39,7 +47,7 @@ export function viewableType(e: FsEntry): ViewableType | null {
   if (e.isDir) return null;
   const ext = extOf(e.name);
   if (e.kind === "image" || RAW_EXT.includes(ext)) return "image";
-  if (e.kind === "video") return "video";
+  if (e.kind === "video" || VIDEO_EXT.includes(ext)) return "video";
   if (e.kind === "audio") return "audio";
   if (ext === "pdf") return "pdf";
   if (TEXT_EXT.includes(ext)) return "text";

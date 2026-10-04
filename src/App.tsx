@@ -973,6 +973,7 @@ export default function App() {
         {viewing && (view === "files" || view === "search") && (
           <FileViewer
             entry={viewing}
+            decoder={cfg.ui.videoDecoder}
             onExit={() => setViewing(null)}
             onDownload={(e) => {
               setViewing(null);

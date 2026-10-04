@@ -21,6 +21,9 @@ export default function PreviewModal(p: Props) {
   const [err, setErr] = useState("");
   const [dataUrl, setDataUrl] = useState("");
   const [mediaUrl, setMediaUrl] = useState("");
+  // 0.3.0 需求1：视频解码失败 → 外部播放器兜底入口（弹窗内不自动外起，防惊吓）
+  const [mediaPath, setMediaPath] = useState("");
+  const [vErr, setVErr] = useState(false);
   const e = p.entry;
   // 0.2.1：显示分流统一走 viewableType（与查看器同一支持集，含相机 RAW——
   // kind 为 other 但 Rust 可提取内嵌 JPEG 预览入媒体缓存，图像/媒体按图片通道）
@@ -32,6 +35,8 @@ export default function PreviewModal(p: Props) {
     (async () => {
       setBusy(true);
       setErr("");
+      setVErr(false);
+      setMediaPath("");
       try {
         if (vt === "text") {
           const d = await src.previewData(e);
@@ -39,7 +44,10 @@ export default function PreviewModal(p: Props) {
         } else if (vt) {
           // 0.1.7：图像改走缓存通道（fs/srv_media_cache 无大小上限），大图预览不再报"文件过大"
           const path = await src.mediaCache(e);
-          if (!cancelled) setMediaUrl(convertFileSrc(path));
+          if (!cancelled) {
+            setMediaPath(path);
+            setMediaUrl(convertFileSrc(path));
+          }
         }
       } catch (ex) {
         if (!cancelled) setErr(String(ex));
@@ -54,6 +62,10 @@ export default function PreviewModal(p: Props) {
   }, [e.path]);
 
   const unsupported = !busy && !err && !dataUrl && !mediaUrl;
+  const openExternal = () => {
+    if (!mediaPath) return;
+    api.openMedia(mediaPath).catch((ex) => setErr(String(ex)));
+  };
 
   return (
     <Modal title={`预览 · ${e.name}（${fmtSize(e.size)}）`} onClose={p.onClose} width={860}>
@@ -66,8 +78,18 @@ export default function PreviewModal(p: Props) {
         {err && <div className="error-bar">{err}</div>}
         {!busy && !err && mediaUrl && vt === "image" && <img src={mediaUrl} alt={e.name} />}
         {!busy && !err && dataUrl && <pre className="preview-text">{b64ToText(dataUrl)}</pre>}
-        {!busy && !err && mediaUrl && vt === "video" && (
-          <video className="preview-video" src={mediaUrl} controls autoPlay />
+        {/* 0.3.0 需求1：预览视频同样捕获系统解码失败（onError）→ 外部播放器兜底入口；
+            弹窗内不自动外起（防惊吓），需要双击进查看器或点下方按钮 */}
+        {!busy && !err && mediaUrl && vt === "video" && !vErr && (
+          <video className="preview-video" src={mediaUrl} controls autoPlay onError={() => setVErr(true)} />
+        )}
+        {!busy && !err && vt === "video" && vErr && (
+          <div className="empty">
+            无法在预览内解码该视频——可能缺少系统 HEVC/H.265 解码组件，或容器/编码不受支持
+            <button className="btn primary" disabled={!mediaPath} onClick={openExternal}>
+              用外部播放器打开
+            </button>
+          </div>
         )}
         {!busy && !err && mediaUrl && vt === "audio" && (
           <div className="preview-audio-wrap">

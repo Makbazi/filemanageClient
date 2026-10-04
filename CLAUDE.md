@@ -29,9 +29,11 @@ src/lib/
   transtypes.ts        TransferTask/TransferStatus 共享契约（状态串 = Rust 事件）
   theme.ts             THEMES 注册 + applyTheme(data-theme)
   types.ts format.ts errors.ts(AuthError)
-  preview.ts           viewableType 查看/预览统一类型判定 + 文本解码 + RAW_EXT
+  preview.ts           viewableType 查看/预览统一类型判定 + 文本解码 + RAW_EXT + VIDEO_EXT
                        （0.2.1 各相机 RAW 扩展名并入 image 分支；与 Rust thumb.rs
                        is_raw_ext 同表——kind 不改，显示分流一律走 viewableType）
+                       （0.3.0 VIDEO_EXT（H.264/H.265 容器/裸流）并入 video 分支；与 Rust
+                       localfs kind_of / player.rs 三处同表；有意不含 ts——撞 TypeScript）
                        （App/FileView/FileGrid/SearchView/FileViewer/PreviewModal 共享）
 src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView TransfersView
                        AIView PreviewModal FileViewer ShareDialog AclDialog VersionsDialog
@@ -46,22 +48,37 @@ src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView Tra
                        （TransfersView：任务注册表管理页，侧栏"传输"入口带未完成任务角标，
                        全部/上传/下载筛选；ContextMenu/UploadToDialog：本地文件右键上传到
                        一个/多个远程（0.6.0 需求7））
+                       （0.3.0：外观页签新增"关闭按钮（X）行为"select（托盘/退出，默认托盘）
+                       与"视频播放（H.264/H.265）"radio+外部播放器命令输入（Enter/失焦提交）+
+                       测试按钮，均 uiSet 即时持久化；FileViewer/PreviewModal 视频 onError 兜底
+                       面板 + openMedia 外部播放入口，FileViewer 增 decoder prop）
 src/styles/            base.css（组件）+ themes.css（5 套主题变量）
-src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb 的 command 注册 + 启动清理)
-                       config.rs(AppConfig: localRoots/servers(caFile)/ai/active/ui(sidebarCollapsed)/
-                                  transfer/trashRetentionDays；keyring_ok；update() 统一做
-                                  令牌同步凭证库+config.json 脱敏)
+src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/player 的 command 注册 +
+                       启动清理；0.3.0：TrayIconBuilder 托盘（菜单=显示主窗口/退出，左键仅唤醒——
+                       Linux appindicator 不派发点击事件，菜单为主路径）+ CloseRequested 按
+                       ui.closeAction 拦截隐藏（TRAY_OK/QUITTING 原子标志，托盘失败绝不炸启动）+
+                       tauri-plugin-single-instance 最先注册（重复启动唤起已有窗口）)
+                       config.rs(AppConfig: localRoots/servers(caFile)/ai/active/ui(sidebarCollapsed/
+                                  closeAction=tray|quit(默认tray)/videoDecoder=system|external(默认system)/
+                                  videoPlayerCmd(0.3.0))/transfer/trashRetentionDays；keyring_ok；
+                                  update() 统一做令牌同步凭证库+config.json 脱敏)
                        secret.rs(系统凭证库 keyring：token 存取/探测/删除；不可用时回退明文并提示)
                        localdb.rs(本地元数据 sqlite：ai_descriptions/trash_items/file_versions/
                                   analysis_tasks；open_and_migrate 幂等迁移 user_version；
                                   旧 *.json 首次启动自动导入后改名 *.imported)
-                       localfs.rs(防逃逸 fs_* + 本地版本库 + fs_import/export + fs_walk(0.2.0 目录树枚举，需求41) +
+                       localfs.rs(防逃逸 fs_* + 本地版本库 + kind_of(0.3.0 视频扩展表扩 hevc/h265/h264/
+                                  m2ts/mpg…，不含 ts)+ fs_import/export + fs_walk(0.2.0 目录树枚举，需求41) +
                                   fs_media_cache(0.1.7 起带可选 ver 版本串入缓存键；0.2.1 RAW 存提取的内嵌预览 .jpg) +
                                   fs_thumb(0.2.1 网格缩略图：媒体缓存 ≤512px .thumb.jpg 路径))
                        serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache(同 ver，0.2.1 同 RAW 分支；内部 srv_media_ensure)/preview_data + srv_thumb(0.2.1 改版：加 ver、返回缩略图路径) + transfer_cancel)
                        thumb.rs(0.2.1 相机 RAW：is_raw_ext 品牌扩展表 + extract_preview 字节级最大内嵌 JPEG
                                   提取（SOI 扫描 + 段链校验至 EOI，熵数据/progressive 合法，垃圾候选拒绝）+
                                   ensure_thumb image 缩放 ≤512px JPEG 入媒体缓存)
+                       player.rs(0.3.0 需求1 外部播放器：open_media(限媒体缓存目录内文件——命令不经
+                                  capabilities 门控故 canonicalize+前缀纵深防御；videoPlayerCmd 空→
+                                  opener 插件系统关联播放器，非空→argv 直起不经 shell、{file} 占位、
+                                  Windows CREATE_NO_WINDOW、spawn 分离) + test_player_command(设置页
+                                  测试：开缓存最新视频或 0 字节 fmc-selftest.mp4 探测，返回实际路径))
                        ai.rs(本地 AI)
 ```
 
@@ -121,7 +138,7 @@ cd src-tauri && cargo check
    兼容旧 config.json。
 7. **主题**：颜色一律用 CSS 变量（themes.css），组件样式禁止硬编码色值；
    新主题 = themes.css 增加一个 `[data-theme=...]` 块 + theme.ts THEMES 注册。
-8. **预览/查看（0.1.7 契约；0.2.1 增缩略图全量 + RAW）**：图片/视频/音频/PDF 一律经媒体缓存 + `convertFileSrc`
+8. **预览/查看（0.1.7 契约；0.2.1 增缩略图全量 + RAW；0.3.0 增视频解码体系）**：图片/视频/音频/PDF 一律经媒体缓存 + `convertFileSrc`
    （asset 协议 scope 只授权应用缓存目录；无大小上限——大图片可看；缓存键必须并入
    `ver`＝entry.mtime 串，防覆盖后 exists 短路命中旧内容）；文本用 data URL（仍 ≤8MiB）。
    **相机 RAW（0.2.1）**：浏览器不可解码——`viewableType` 按 `RAW_EXT`（与 Rust
@@ -137,6 +154,13 @@ cd src-tauri && cargo check
    webkitgtk 支持参差违背双引擎一致性）。类型判定必须走 `lib/preview.ts`
    `viewableType`，不得与弹窗支持集分叉。层叠契约：`.modal-mask` 100 >
    `.viewer-fs` 90 > `.viewer` 80 > 页面内容（401 登录框恒在查看之上）。
+   **视频解码（0.3.0 需求1）**：H.264/H.265 默认 `videoDecoder=system`——`<video>`
+   即 WebView 原生系统解码器（Windows Media Foundation / Linux GStreamer），必须挂
+   `onError` → 提示面板（缺 HEVC 组件指引）+ [用外部播放器打开]（`open_media` 开
+   媒体缓存路径；`videoPlayerCmd` 空=系统关联播放器，`{file}` 占位符，argv 直起不经
+   shell）；`external` 模式查看器自动外起一次（ref 去重）并给 [在本窗口播放] 覆盖，
+   **PreviewModal 一律不自动外起只给按钮**；`VIDEO_EXT`（三处同表：preview.ts /
+   localfs kind_of / player.rs）**不得纳入 `ts`**（TypeScript 冲突）。不内嵌 ffmpeg。
 9. **版本号三处同步**（需求19），发版时更新 CHANGELOG 兼容矩阵（需求20）。
 10. 编译验证：`npm run build` + `cargo check` 通过即可（需求29，不写测试）；
     **不做 git 提交/分支/tag**（需求30）。
@@ -151,10 +175,19 @@ cd src-tauri && cargo check
     credentials**（禁止恢复旧的 `*c = config` 全量替换——会把已轮换的令牌写回旧值，
     造成"一直刷新/登录框反复弹"）。记住密码按 服务端+账户 隔离存 keyring，
     config.json 永不落密码本体。
+13. **托盘常驻与关窗行为（0.3.0 需求2）**：`ui.closeAction`（默认 **tray**）只影响主
+    窗口 `CloseRequested`——tray 且 `TRAY_OK` 且非 `QUITTING` 时 `prevent_close()+hide()`
+    （先退全屏）；**托盘构建失败必须退回退出行为**（绝不静默丢窗口），托盘菜单
+    「退出」先置 `QUITTING` 再 `exit(0)`。恢复入口：托盘菜单「显示主窗口」（Linux
+    appindicator 不派发点击事件，菜单是 Linux 主路径）/左键·双击唤窗（Windows）/
+    重复启动经单实例插件唤起。**禁止**新增任何"进程后台仍持有可见模态"假设——
+    隐藏态视频/音频继续播放属已接受边界。single-instance 钉 `~2.4.5`（2.5.x 需
+    tauri ^2.12 + MSRV 1.90，勿随手升）。
 
 ## 当前版本
 
-0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.0）** / 0.1.x / 0.7.x / 0.6.x（0.2.1 数据协议零变更，兼容关系承接 0.2.0）。
+0.3.0（H.264/H.265 视频播放体系 + 系统托盘常驻；数据协议零变更）+ 0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.0）** / 0.1.x / 0.7.x / 0.6.x（0.3.0 全部为客户端本地行为，兼容关系承接 0.2.1）。
+**0.3.0（2026-10-04 视频播放 + 托盘常驻；数据协议零变更）**：需求原句——支持 h264/h265 视频播放，调用系统解码器或者可配置视频解码器；新增托盘常住，设置里按叉可选退出/进托盘，默认进托盘。视频：`VIDEO_EXT` 并入 `viewableType` video 分支（与 Rust kind_of/player.rs 三处同表，不含 ts）；`FileViewer`/`PreviewModal` 视频挂 `onError` → 缺 HEVC 系统组件提示面板 + [用外部播放器打开]；`ui.videoDecoder=external` 时查看器自动外起一次（可 [在本窗口播放] 覆盖，弹窗不自动起）；新 `player.rs`（`open_media` 限媒体缓存目录、空命令走 opener 系统关联、自定义命令 argv 直起不经 shell、`{file}` 占位、Windows CREATE_NO_WINDOW；`test_player_command` 设置页探测）。托盘：tauri `tray-icon` 特性 + `TrayIconBuilder`（菜单显示/退出，Linux 恢复走菜单——appindicator 不派发点击事件）+ `CloseRequested` 按 `ui.closeAction`（默认 tray；托盘不可用自动退回退出，构建失败不炸启动，`QUITTING` 防再拦截）+ `tauri-plugin-single-instance ~2.4.5`（钉版防 tauri 核/MSRV 悬崖）唤起已有窗口；`bundle.linux.deb.depends` 增 `libayatana-appindicator3-1`。设置→外观两处新配置均 uiSet 即时保存；capabilities 零改动。已知边界：H.265 窗口内播放依赖系统 HEVC 组件（不内嵌 ffmpeg）；隐藏态媒体继续播；服务端模式 external 需整文件先入媒体缓存。
 **0.2.1（2026-10-03 网格缩略图全量显示 + 相机 RAW；数据协议零变更）**：需求原句——按缩略图浏览时也要显示文件内容（图片、以及尼康 NEF 等各品牌 RAW），点不点眼睛都能看（眼睛预览保留）。根因：网格走 `thumbData` data URL（本地 ≤4MiB/srv_thumb ≤2MiB/筛选 ≤8MiB）且过滤 `kind==="image"`，大图与 RAW（kind=other）只剩图标。**新 Rust `thumb.rs`**：`extract_preview` 字节级提取 RAW 内**最大完整 JPEG 预览**（SOI→按段链校验至 EOI，SOS 熵数据只认填充字节/RST/progressive 间 DHT，坏结构候选拒绝——绝不半张图当预览）；`fs_media_cache`/`srv_media_cache` RAW 分支把提取结果存为 `<key_hash>.jpg`（服务端经可续传 scratch 转存后删源）→ 双击查看/眼睛预览自动支持 RAW（零新端点、Server 零改动，字节仍走既有 `/api/v1/preview`，匿名语义不变）；新 `fs_thumb`/改版 `srv_thumb`（加 ver、返回媒体缓存 `<key_hash>.thumb.jpg` ≤512px 路径，svg/heic 等缩放失败且 ≤8MiB 回传原路径）→ `DataSource.thumbData` 替换为 `thumbPath`。前端：`RAW_EXT` 并入 `viewableType` image 分支（kind 不改）、网格 effect 改 `viewableType` 判定去大小上限、并发池 3、`convertFileSrc` 加载；`PreviewModal` 分流统一 `viewableType`。新增依赖 `image` crate（default-features 关，仅常用光栅解码+jpeg 编码）。已知边界：服务端首过整文件入缓存（`$APPCACHE/media` 无淘汰为既有缺口，本批使用面扩大）；RAW 保真=相机内嵌预览（非全精度解码）；缩略图仍限前 60。**0.2.0（2026-10-03 目录上传，需求41；依赖 Server 0.2.0 加性端点 `POST /api/v1/mkdirs`，配旧服务端自动退化逐个 `mkdir`）**：本地模式右键目录 →"上传目录到远程…"——Rust `fs_walk` 递归枚举（符号链接/`.fmtrash` 跳过，深度 64/条目 20000 上限，超限整体拒绝绝不传半棵树）→ `serverMkdirs` 一次建好远端目录骨架（含空目录）→ 逐文件经并发池（3）入组队列；传输 UI **整目录聚合为一条组行**（总字节进度 + `done/total 个文件`，暂停/继续/取消/重试整组粒度；冲突文件组重试按覆盖语义重跑，服务端覆盖前先存版本，需求3）。`UploadToDialog` 新增 `isDir`；transfer.ts 新增 `enqueueGroup/settle/pump/组级 API/rowActions`（子任务只进注册表不进 order，UI 快照天然只见组行；`removeTask/clearFinished` 级联清理子任务）；`watchGroup` 整组终态才一次汇总通知+刷新。已知限制：组内子任务暂不可展开（`getGroupChildren` API 已留）、20000 条硬上限、非 UTF8 文件名沿用 `fs_list` lossy 口径。
 **0.1.7（2026-10-03 查看/预览分离+大图片查看+查看器全屏，数据协议零变更）**：双击**可预览类型**
 （`viewableType`：image/video/audio/pdf/文本扩展名）→ 新建 `FileViewer` 主区覆盖层就地显示
