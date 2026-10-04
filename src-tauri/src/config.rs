@@ -149,6 +149,18 @@ pub struct UiConf {
     /// 快速切换第二按钮指向的远程服务端 id（0.6.0 需求10）
     #[serde(default)]
     pub last_server_id: Option<String>,
+    /// 关闭按钮(X)行为（0.3.0 需求2）：tray=隐藏到托盘（默认；托盘不可用环境
+    /// 自动退回退出）| quit=退出程序
+    #[serde(default = "default_close_action")]
+    pub close_action: String,
+    /// 视频播放方式（0.3.0 需求1）：system=WebView 内 <video> 走系统解码器
+    /// （默认；解码失败时查看器提示并可一键改用外部播放器）| external=外部播放器
+    #[serde(default = "default_video_decoder")]
+    pub video_decoder: String,
+    /// 外部播放器命令（0.3.0；空=系统关联播放器）。argv 直起不经 shell，
+    /// 含 `{file}` 则替换为文件路径，否则路径追加为末位参数；路径含空格请为命令加引号
+    #[serde(default)]
+    pub video_player_cmd: Option<String>,
 }
 
 fn default_theme() -> String {
@@ -163,6 +175,12 @@ fn default_true() -> bool {
 fn default_trash_days() -> i64 {
     30
 }
+fn default_close_action() -> String {
+    "tray".into()
+}
+fn default_video_decoder() -> String {
+    "system".into()
+}
 
 impl Default for UiConf {
     fn default() -> Self {
@@ -175,6 +193,9 @@ impl Default for UiConf {
             sidebar_collapsed: true,
             restore_sessions: true,
             last_server_id: None,
+            close_action: default_close_action(),
+            video_decoder: default_video_decoder(),
+            video_player_cmd: None,
         }
     }
 }

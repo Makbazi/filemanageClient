@@ -10,12 +10,26 @@
 
 | filemanageClient | 配套 filemanageServer | 说明 |
 |---|---|---|
-| 0.2.1（当前） | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.0 兼容关系**零变更、数据协议零变更**：网格缩略图全量显示与相机 RAW（NEF/CR2/ARW/RAF…）查看/预览均为客户端本地 Rust 行为——字节仍取自既有 `GET /api/v1/preview` 媒体缓存通道（同端点同权限、匿名语义不变，需求6 无新增面）；新增 `fs_thumb`、`srv_thumb` 改版（改返回媒体缓存缩略图路径、加 ver）属本地 Rust 命令契约，不跨进程。目录上传仍依赖 Server ≥0.2.0 |
+| 0.3.0（当前） | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.1 兼容关系**零变更、数据协议零变更**：H.264/H.265 播放 = WebView 原生**系统解码器**（Windows Media Foundation / Linux GStreamer）+ 可配置**外部播放器**兜底（字节仍取既有 `GET /api/v1/preview` 媒体缓存通道，Server 不感知）；托盘常驻/关窗行为/单实例/`open_media`·`test_player_command` 均为客户端本地 Rust 行为，不跨进程。Linux 托盘运行期依赖 appindicator（deb depends `libayatana-appindicator3-1`） |
+| 0.2.1 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.0 兼容关系**零变更、数据协议零变更**：网格缩略图全量显示与相机 RAW（NEF/CR2/ARW/RAF…）查看/预览均为客户端本地 Rust 行为——字节仍取自既有 `GET /api/v1/preview` 媒体缓存通道（同端点同权限、匿名语义不变，需求6 无新增面）；新增 `fs_thumb`、`srv_thumb` 改版（改返回媒体缓存缩略图路径、加 ver）属本地 Rust 命令契约，不跨进程。目录上传仍依赖 Server ≥0.2.0 |
 | 0.2.0 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 需求41 目录上传：本地模式右键目录 → Rust `fs_walk` 递归枚举（跳符号链接与 `.fmtrash`，深度 64/条目 20000 硬上限，超限整体拒绝绝不传半棵树）→ `POST /api/v1/mkdirs` 一次建好远端目录骨架（含空目录；配 Server <0.2.0 自动退化为逐个 `mkdir`，幂等递归语义一致、仅往返更多）→ 逐文件入队上传（并发池 3 限流），传输 UI 整目录聚合为一条组行（总字节进度 + 文件计数，暂停/继续/取消/重试整组粒度；冲突文件经组"重试"按覆盖语义重跑——服务端覆盖前先存版本，需求3）；其余功能承接 0.1.7 零变更 |
 | 0.1.1–0.1.7 | 0.1.x（当时推荐；当前 Server 0.1.1）；0.7.x/0.6.x/0.5.x 亦可用 | 兼容关系承接 0.1.6 不变（数据协议零变更：查看/预览分离与大图内联查看为纯客户端 UI/本地上屏缓存行为，图片取字节由 data URL 改走**既有** `/api/v1/preview` 端点的媒体缓存通道，服务端无感；`fs_media_cache`/`srv_media_cache` 新增可选 `ver` 参数属本地 Rust 命令契约，不跨进程）。0.1.6 仅修复 Windows 本地目录路径校验误报（纯客户端本地行为），数据协议零变更。0.1.5 新增设置页"关于"页签与页头版本号显示，纯 UI 行为、数据协议零变更（"配套服务端"一栏为兼容矩阵静态文案，不产生新的接口依赖）。新增账户页自助改密（需 Server ≥0.1.0 的 `/auth/change-password`；配旧服务端时该按钮报 404/405，其余功能不变）。0.7.x/0.6.x 服务端下家目录虚拟根、jail 语义与登录态处理同 0.6.1。**Server 0.1.1（文件存储驱动、管理台切换/导出/暂停）为服务端存储与管理面增项，数据协议零变更，本客户端无感兼容（仅更新本兼容列表，代码不动）**。Client 0.1.1–0.1.6 为构建体系与客户端本地修复/改版（baseUrl 协议头归一、连接错误透出、对话框层级修复、设置全屏页、关于页版本信息、Windows 本地目录校验修复），0.1.7 为查看/预览分离 + 大图查看 + 查看器全屏，均纯 UI/本地行为，数据协议零变更，对本矩阵无影响 |
 | ≤0.6.1 | 0.5.x–0.7.x | 见 git 历史（已按需求39清空） |
 
 ## 未发布版本
+
+### 新增：H.264/H.265 视频播放 + 系统托盘常驻（2026-10-04，0.3.0；数据协议零变更）
+- **需求原句**：需求1——支持 h264、h265 视频播放，调用系统解码器或者可配置视频解码器；需求2——新增托盘常住，可在设置里设置按叉后是退出程序还是在托盘，默认在托盘。
+- **根因/现状**：① WebView 内 `<video>` 本身即经系统解码器栈（Windows WebView2→Media Foundation，Linux webkitgtk→GStreamer），但 `viewableType` 只认 `kind==="video"`，服务端未标 video 的 HEVC 常见容器/裸流（.hevc/.h265/.m2ts/.mpg/.ts…）进不了查看通道；② `FileViewer`/`PreviewModal` 的 `<video>` 无 `onError`——系统缺 HEVC 组件时表现为空白死播放器、毫无指引，也无任何"外部播放器"通路；③ 无托盘、无关窗拦截、无单实例。
+- **视频分类（双端同表）**：新 `VIDEO_EXT`（`lib/preview.ts`，与 Rust `localfs.rs` `kind_of` 新视频扩展臂、`player.rs` 探测表三处同集合）并入 `viewableType` video 分支——**kind 不改**（RAW 先例，显示分流一律走 viewableType）；**有意不含 `ts`**（与 TypeScript 源文件冲突，`.ts` 仍按文本查看）。
+- **解码策略（默认 system）**：`FileViewer`/`PreviewModal` 视频挂 `onError` → 系统解码失败时替换为提示面板（"可能缺少 HEVC/H.265 系统解码组件——Windows 装『HEVC 视频扩展』、Linux 装 gstreamer HEVC 插件"）+ [用外部播放器打开]（+查看器 [重试] 重挂 `<video>`）。设置 `ui.videoDecoder="external"` 时查看器缓存路径就绪后**自动外起一次**（ref 去重，含 StrictMode），面板提供 [重新打开]/[在本窗口播放] 覆盖；预览弹窗一律不自动外起（小窗防惊吓，只给按钮）。
+- **新 Rust 模块 `src-tauri/src/player.rs`**：`open_media`（仅允许打开 `$APPCACHE/media` 内的已落盘缓存文件——本命令不经 capabilities 门控，canonicalize+前缀校验做纵深防御；命令留空走 `tauri_plugin_opener::open_path` 系统关联播放器，非空 `spawn_player_cmd`：仅按双引号分词、argv 直起**不经 shell**、`{file}` 占位符替换否则路径追加末位、spawn 后分离、Windows 加 CREATE_NO_WINDOW）；`test_player_command`（设置页"测试外部播放器"：打开媒体缓存中最新视频条目，无则写 0 字节 `fmc-selftest.mp4` 探测，返回实际路径供 UI 回显）。`UiConf` 新增 `closeAction`（tray|quit，**默认 tray**）/`videoDecoder`（system|external，默认 system）/`videoPlayerCmd`（Option，默认 None）三字段（serde default 兼容旧 config.json）。
+- **托盘常驻（`lib.rs`）**：tauri `tray-icon` 特性启用 `TrayIconBuilder`（复用默认窗口图标；菜单=显示主窗口/退出；左键单击·双击仅唤醒隐藏窗口不做隐藏——**tauri 源码注明 Linux appindicator 不派发点击事件，Linux 恢复主路径=菜单项**）；`on_window_event CloseRequested` 按 `ui.closeAction==tray` 且托盘可用且非主动退出（`QUITTING` 原子标志）→ `prevent_close()`+先退全屏再 `hide()`；托盘构建失败仅记 `TRAY_OK=false`——**绝不使启动失败**，X 自动退回"退出"，不会把用户关进无窗口黑盒。托盘菜单"退出"置 `QUITTING` 后 `exit(0)`。
+- **单实例**：`tauri-plugin-single-instance` 桌面端最先注册，重复启动回调 `show/unminimize/set_focus` 唤起已有窗口。钉 **`~2.4.5`**：2.5.x 要求 tauri ^2.12（当前锁 2.11.5）且 MSRV 1.90，build-env 镜像 stable 不可控；2.4.5 所需 zbus 已在依赖图/缓存。
+- **打包/配置**：`tauri.conf.json` 新增 `bundle.linux.deb.depends ["libayatana-appindicator3-1"]`、`rpm.depends ["ayatana-appindicator"]`（Linux 托盘运行期 dlopen ayatana；rpm 包名按 Fedora/RHEL 口径，目标发行版待验）；`capabilities/default.json` 零改动（托盘/关窗拦截/自定义命令均为 Rust 侧，不走 IPC ACL）。设置→外观：新增"关闭按钮（X）行为"select 与"视频播放（H.264/H.265）"radio + 外部播放器命令输入（Enter/失焦即时保存）+ 测试按钮，全部经 `uiSet` 即时持久化。
+- **新增依赖**：tauri feature `tray-icon`（tray-icon/muda/libappindicator 已在 Cargo.lock 与本地缓存，离线可编）；`tauri-plugin-single-instance ~2.4.5`（Linux 走 tokio+zbus，已在图）。无新 JS 依赖。
+- **已知边界/后续项**：H.265 系统解码依赖 OS 组件（Windows 无『HEVC 视频扩展』/Linux 无 gstreamer HEVC 插件时窗口内播不了——本批以提示面板+外部播放器兜底为交付语义，不内嵌 ffmpeg 转码）；MKV/AVI 容器在 webkitgtk 支持参差，同样走兜底；服务端模式 external 需整文件先落媒体缓存（与 0.1.7 查看通道同代价，`$APPCACHE/media` 无淘汰为既有缺口）；窗口隐藏到托盘时已开视频/音频继续播放；外部命令启动器为本地单用户桌面威胁模型（与 fs_* 同位，不经 shell、拒绝空命令）；GNOME 需 AppIndicator shell 扩展。
+- 数据协议零变更（视频字节仍走既有 `/api/v1/preview` 媒体缓存通道，同权限、匿名语义不变），与 Server 0.2.x/0.1.x/0.7.x/0.6.x/0.5.x 兼容关系完全承接 0.2.1。
 
 ### 新增：网格缩略图全量显示 + 相机 RAW 查看/预览（2026-10-03，0.2.1；数据协议零变更）
 - **需求原句**：文件在按缩略图浏览时也要显示文件内容（图片也要显示出来），同时对 RAW 格式的图片（各相机品牌，如尼康 NEF）也要显示出来——不只是点眼睛才能看到缩略图，点不点眼睛都能看（点眼睛的预览功能保留）。

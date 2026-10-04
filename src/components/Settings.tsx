@@ -10,7 +10,15 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getName, getTauriVersion, getVersion } from "@tauri-apps/api/app";
 import type { AIProvider, AppConfig, RootConf, ServerConf, ServerRoot } from "../lib/types";
 import { uid } from "../lib/types";
-import { active, credForget, fetchRoots, serverCall, serverChangePassword, serverLogout } from "../lib/api";
+import {
+  active,
+  credForget,
+  fetchRoots,
+  serverCall,
+  serverChangePassword,
+  serverLogout,
+  testPlayerCommand,
+} from "../lib/api";
 import { THEMES } from "../lib/theme";
 import { Confirm, Modal } from "./Modals";
 import { IconPlus, IconTrash, IconPencil } from "./icons";
@@ -48,6 +56,10 @@ export default function Settings(p: Props) {
   // 明文 http 保存前的二次确认（0.4.0 安全升级）
   const [httpWarn, setHttpWarn] = useState<ServerConf | null>(null);
   const [info, setInfo] = useState<AppInfo>({ name: "FileManage", version: "", tauri: "" });
+  // 0.3.0 需求1：外部播放器命令草稿（Enter/失焦提交 uiSet）与测试按钮状态
+  const [playerDraft, setPlayerDraft] = useState(p.cfg.ui.videoPlayerCmd ?? "");
+  const [testMsg, setTestMsg] = useState("");
+  const [testErr, setTestErr] = useState("");
 
   // 版本信息：走 Tauri app 命令（core:app:default 已含 allow-version/allow-name/
   // allow-tauri-version，无需扩权限），故 -V 覆盖产物版本时这里同步变化；
@@ -162,6 +174,22 @@ export default function Settings(p: Props) {
   };
   const trSet = (patch: Partial<AppConfig["transfer"]>) =>
     setCfg({ ...cfg, transfer: { ...cfg.transfer, ...patch } });
+
+  const commitPlayer = () => {
+    const v = playerDraft.trim();
+    if (v !== (cfg.ui.videoPlayerCmd ?? "")) uiSet({ videoPlayerCmd: v });
+  };
+
+  async function runPlayerTest() {
+    setTestMsg("");
+    setTestErr("");
+    try {
+      const opened = await testPlayerCommand(playerDraft.trim());
+      setTestMsg(`已启动外部播放器，探测文件：${opened}`);
+    } catch (ex) {
+      setTestErr(String(ex));
+    }
+  }
 
   return (
     <div className="page">
@@ -287,6 +315,22 @@ export default function Settings(p: Props) {
               </label>
             </div>
           </div>
+          {/* 0.3.0 需求2：托盘常住 + 关闭按钮行为（默认托盘） */}
+          <div className="field">
+            <label>关闭按钮（X）行为</label>
+            <select
+              value={cfg.ui.closeAction}
+              onChange={(e) => uiSet({ closeAction: e.target.value as "tray" | "quit" })}
+            >
+              <option value="tray">最小化到托盘（默认）</option>
+              <option value="quit">退出程序</option>
+            </select>
+            <p className="dim tip">
+              常驻托盘：点 X 隐藏窗口到系统托盘，经托盘图标左键/双击（Windows）或托盘菜单「显示主窗口」恢复；
+              重复启动应用只会唤起已打开的窗口（不产生第二个实例）；无 AppIndicator 宿主等托盘不可用的环境
+              自动退回「退出程序」，不会把窗口藏丢。
+            </p>
+          </div>
           <label className="check-item">
             <input
               type="checkbox"
@@ -320,6 +364,59 @@ export default function Settings(p: Props) {
             启动时恢复各服务端登录状态（0.6.0 需求9：上次保持登录的重开后仍是登录态；
             关闭则每次启动全部退出——已记住的密码保留，退出状态的服务端可一键快速重登）
           </label>
+          {/* 0.3.0 需求1：H.264/H.265 播放方式——系统解码器（WebView 原生）或可配置外部播放器 */}
+          <div className="field">
+            <label>视频播放（H.264 / H.265）</label>
+            <div className="radio-row">
+              <label className="radio-item">
+                <input
+                  type="radio"
+                  checked={cfg.ui.videoDecoder === "system"}
+                  onChange={() => uiSet({ videoDecoder: "system" })}
+                />
+                系统解码器（默认，窗口内播放）
+              </label>
+              <label className="radio-item">
+                <input
+                  type="radio"
+                  checked={cfg.ui.videoDecoder === "external"}
+                  onChange={() => uiSet({ videoDecoder: "external" })}
+                />
+                外部播放器
+              </label>
+            </div>
+            <p className="dim tip">
+              系统解码器 = 操作系统自带的视频组件（Windows：WebView2/Media Foundation；Linux：GStreamer）。
+              H.265/HEVC 需系统装有对应解码组件（Windows「HEVC 视频扩展」，Linux gstreamer HEVC 插件）；
+              窗口内播放失败时查看器会给出提示，并可一键改用外部播放器。
+            </p>
+            {cfg.ui.videoDecoder === "external" && (
+              <>
+                <div className="field">
+                  <label>播放器命令（留空 = 系统关联的播放器）</label>
+                  <input
+                    placeholder={'mpv ／ vlc ／ "C:\\Program Files\\mpv\\mpv.exe" {file}'}
+                    value={playerDraft}
+                    onChange={(e) => setPlayerDraft(e.target.value)}
+                    onBlur={commitPlayer}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitPlayer();
+                    }}
+                  />
+                </div>
+                <button className="btn small" disabled={!playerDraft.trim()} onClick={() => void runPlayerTest()}>
+                  测试外部播放器
+                </button>
+                {testMsg && <p className="dim tip">{testMsg}</p>}
+                {testErr && <div className="error-bar">{testErr}</div>}
+                <p className="dim tip">
+                  命令直接启动（不经 shell，故不支持 &amp;&amp;/管道）；程序路径含空格请整体加引号；
+                  {'{file}'} 代表视频文件路径，未写则作为末位参数自动追加。测试会打开媒体缓存中最近的视频文件，
+                  缓存为空时改用 0 字节探测文件——播放器报"无法解码"属正常，仅验证命令与参数链路。
+                </p>
+              </>
+            )}
+          </div>
         </div>
       )}
 

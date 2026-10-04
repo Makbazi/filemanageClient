@@ -76,6 +76,12 @@ export interface UiConf {
   restoreSessions: boolean;
   /** 快速切换第二按钮指向的远程服务端 id（0.6.0 需求10） */
   lastServerId?: string | null;
+  /** 关闭按钮(X)行为（0.3.0 需求2，默认 tray：隐藏到托盘；quit：退出程序） */
+  closeAction: "tray" | "quit";
+  /** 视频播放方式（0.3.0 需求1，默认 system=WebView 系统解码器；external=外部播放器） */
+  videoDecoder: "system" | "external";
+  /** 外部播放器命令（0.3.0 需求1；空=系统关联播放器，支持 {file} 占位符） */
+  videoPlayerCmd?: string | null;
 }
 
 /** 已记住密码的服务端账户索引（0.6.0 需求3；密码本体存系统凭证库） */

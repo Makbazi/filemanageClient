@@ -101,7 +101,10 @@ pub(crate) fn kind_of(name: &str, is_dir: bool) -> String {
     let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "heic" | "tiff" => "image",
-        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" => "video",
+        // 0.3.0 需求1：H.264/H.265 常见容器/裸流并入 video（不含 ts——撞 TypeScript；
+        // 与前端 preview.ts VIDEO_EXT / player.rs VIDEO_EXT 同集合）
+        "mp4" | "m4v" | "mkv" | "mov" | "webm" | "avi" | "flv" | "wmv" | "ogv" | "ogm" | "m2ts"
+        | "mts" | "mpg" | "mpeg" | "mpe" | "3gp" | "vob" | "hevc" | "h265" | "h264" => "video",
         "mp3" | "wav" | "flac" | "m4a" | "aac" | "ogg" | "opus" => "audio",
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf" | "epub" => "document",
         "zip" | "tar" | "gz" | "bz2" | "7z" | "rar" | "xz" => "archive",

@@ -35,6 +35,9 @@ function defaultConfig(): AppConfig {
       sidebarCollapsed: true,
       restoreSessions: true,
       lastServerId: null,
+      closeAction: "tray",
+      videoDecoder: "system",
+      videoPlayerCmd: "",
     },
     transfer: { uploadLimitKbps: 0, downloadLimitKbps: 0 },
     trashRetentionDays: 30,
@@ -154,6 +157,18 @@ export async function serverChangePassword(oldPassword: string, newPassword: str
   await loadConfig();
   invalidateSource();
   return r;
+}
+
+// ---------- 外部播放器（0.3.0 需求1） ----------
+
+/** 用外部播放器/系统关联打开媒体缓存文件（参数为 mediaCache() 返回的绝对路径）。 */
+export async function openMedia(path: string): Promise<void> {
+  await invoke("open_media", { path });
+}
+
+/** 设置页测试外部播放器命令，返回实际打开的探测文件路径（可能是 0 字节样本）。 */
+export async function testPlayerCommand(command: string): Promise<string> {
+  return invoke("test_player_command", { command }) as Promise<string>;
 }
 
 export function fetchRoots(serverId: string): Promise<ServerRoot[]> {
