@@ -828,6 +828,8 @@ pub(crate) fn media_cache_path(
     let name = format!("{:x}.{}", cache_hash(&key), if raw { "jpg" } else { ext.as_str() });
     let dest = st.media_cache_dir().join(&name);
     if dest.exists() {
+        // 本地模式条目可能是 hard_link（与用户源文件同 inode）——绝不 touch
+        // 其 mtime（会污染源文件；淘汰按创建序，unlink 只断链接不伤源数据）。
         return Ok(dest);
     }
     if raw {
@@ -839,13 +841,74 @@ pub(crate) fn media_cache_path(
         let jpeg = crate::thumb::extract_preview(&data)
             .ok_or("该 RAW 未找到完整内嵌 JPEG 预览，请下载后用 RAW 软件查看")?;
         fs::write(&dest, &jpeg).map_err(|e| e.to_string())?;
+        crate::cachemgr::note_new_file(jpeg.len() as u64);
+        crate::cachemgr::maybe_enforce(st);
         return Ok(dest);
     }
     let linked = fs::hard_link(&abs, &dest);
     if linked.is_err() {
         fs::copy(&abs, &dest).map_err(|e| e.to_string())?;
     }
+    if let Ok(m) = fs::metadata(&dest) {
+        crate::cachemgr::note_new_file(m.len());
+    }
+    crate::cachemgr::maybe_enforce(st);
     Ok(dest)
+}
+
+/// 批量计算本地文件 SHA-256（0.3.2 目录重传校验 pass2）：流式 64KiB，
+/// 与服务端 fileops.SHA256File 同算法同小写 hex，可直接与服务端存哈希互比。
+/// 逐条目容错：单文件读失败返回 null（调用方按 unknown 处理），绝不整批失败。
+#[tauri::command]
+pub async fn fs_file_hashes(
+    app: AppHandle,
+    root_id: String,
+    rels: Vec<String>,
+) -> Result<Vec<Option<String>>, String> {
+    use sha2::{Digest, Sha256};
+    let st = state(&app);
+    let root = st.root_path(&root_id)?;
+    let mut out = Vec::with_capacity(rels.len());
+    for rel in rels {
+        let abs = match resolve_in_root(&root, &rel) {
+            Ok(a) => a,
+            Err(_) => {
+                out.push(None);
+                continue;
+            }
+        };
+        let h = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut f = match fs::File::open(&abs) {
+                Ok(f) => f,
+                Err(_) => return None,
+            };
+            if !f.metadata().map(|m| m.is_file()).unwrap_or(false) {
+                return None;
+            }
+            let mut hasher = Sha256::new();
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match f.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => hasher.update(&buf[..n]),
+                    Err(_) => return None,
+                }
+            }
+            Some(hex_encode(&hasher.finalize()))
+        })
+        .await;
+        out.push(h.unwrap_or(None));
+    }
+    Ok(out)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 #[tauri::command]

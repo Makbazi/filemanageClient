@@ -3,8 +3,21 @@
 // 与 TransferPanel（浮出小窗）共用 transfer.ts 注册表与 STATUS_LABEL。
 // 0.2.0 需求41：目录上传聚合为一条组行（文件计数；动作经 rowActions 走组级 API，
 // 移除/清除已完成会级联清理子任务）。
-import { useEffect, useState } from "react";
-import { subscribe, rowActions, removeTask, clearFinished, type TransferTask } from "../lib/transfer";
+// 0.3.2：未完成上传账本——重启后进程内任务丢失，这里从 localdb 账本列出
+// "未完成的目录上传组"，[继续]=重建子任务走会话续传+相同跳过，[放弃]=作废
+// 服务端残留会话（清 staging 碎片）。
+import { useCallback, useEffect, useState } from "react";
+import {
+  subscribe,
+  rowActions,
+  removeTask,
+  clearFinished,
+  listJournalPending,
+  resumeJournalGroup,
+  abandonJournalGroup,
+  type JournalGroupRow,
+  type TransferTask,
+} from "../lib/transfer";
 import { STATUS_LABEL } from "../lib/transtypes";
 import type { AppConfig } from "../lib/types";
 import { fmtSize } from "../lib/format";
@@ -17,6 +30,14 @@ interface Props {
 export default function TransfersView(p: Props) {
   const [tasks, setTasks] = useState<TransferTask[]>([]);
   useEffect(() => subscribe(setTasks), []);
+  // 未完成账本组（挂载即查；操作后刷新）
+  const [journal, setJournal] = useState<JournalGroupRow[]>([]);
+  const refreshJournal = useCallback(() => {
+    void listJournalPending().then(setJournal);
+  }, []);
+  useEffect(() => {
+    refreshJournal();
+  }, [refreshJournal]);
   const serverName = (id: string) => p.cfg.servers.find((s) => s.id === id)?.name ?? id;
   const hasFinished = tasks.some((t) => t.status === "done" || t.status === "cancelled");
   // 需求6：上传/下载在同一界面，可筛选区分
@@ -51,6 +72,44 @@ export default function TransfersView(p: Props) {
           </button>
         </div>
       </div>
+      {journal.filter((g) => !tasks.some((t) => t.id === g.gid)).length > 0 && (
+        <div className="card">
+          <div className="page-head">
+            <p className="dim">未完成的上传（上次退出/中断遗留，可从断点继续；已传相同的文件自动跳过）</p>
+          </div>
+          {journal
+            .filter((g) => !tasks.some((t) => t.id === g.gid))
+            .map((g) => (
+              <div key={g.gid} className="journal-row">
+                <span className="ficon k-other">
+                  <IconUpload size={14} />
+                </span>
+                <span className="journal-label" title={`${g.localAbs} → ${serverName(g.serverId)}/${g.remotePrefix}`}>
+                  {g.label || g.remotePrefix} <span className="dim">→ {serverName(g.serverId)}</span>
+                </span>
+                <span className="dim">
+                  {g.doneFiles}/{g.totalFiles} 个文件
+                </span>
+                <button
+                  className="btn small primary"
+                  onClick={() => {
+                    void resumeJournalGroup(g).then(() => setTimeout(refreshJournal, 300));
+                  }}
+                >
+                  继续
+                </button>
+                <button
+                  className="btn small"
+                  onClick={() => {
+                    void abandonJournalGroup(g).then(refreshJournal);
+                  }}
+                >
+                  放弃
+                </button>
+              </div>
+            ))}
+        </div>
+      )}
       {tasks.length === 0 ? (
         <div className="card">
           <div className="empty">暂无传输任务</div>

@@ -1,7 +1,7 @@
 // 文件列表页：面包屑 + 操作工具栏 + 筛选/排序栏（需求15/16）+
 // 列表/缩略图两种浏览风格（需求14）。
-import { useEffect, useMemo, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { thumbBlobUrl } from "../lib/thumbcache";
 import type { FsEntry } from "../lib/types";
 import type { SourceCapabilities } from "../lib/datasource";
 import { fmtSize, fmtTime, dirParts, kindLabel, toMillis } from "../lib/format";
@@ -79,7 +79,34 @@ export default function FileView(p: Props) {
   const [kindFilter, setKindFilter] = useState("");
   const [sortField, setSortField] = useState<"name" | "size" | "mtime">("name");
   const [sortAsc, setSortAsc] = useState(true);
+  // —— 0.3.2 网格缩略图视口调度（需求3/5："全量显示 + 可见±2屏预取 + 失败重试"） ——
+  // 旧实现三宗罪：slice(0,60) 硬上限（目录大 → 后面的图永远不出图）、失败写死
+  // null 永不重试、按 path 键粘住旧图/错误。新实现：
+  //  · IntersectionObserver（root=.page 滚动容器，rootMargin 上下各 2 屏）只把
+  //    "即将/正在可见"的条目排入队列——图片再多也全量覆盖（滚到哪出到哪）；
+  //  · 键 = path@mtime（刷新/覆盖后自动换新键重取）；目录切换整体复位；
+  //  · 并发 3；瞬时失败退避 2s/8s/30s 重试 ≤3 轮才落图标（thumbPath 语义：
+  //    null=永久无图不重试，throw=瞬时重试）；
+  //  · 字节经 thumbcache（≤2GB 内存 LRU blob），滚动回来零磁盘读。
+  // 键 = 来源标识 + path@mtime（服务端虚拟根 id 可跨服务端重名，须带 serverId；
+  // 与 Rust 媒体缓存键同构）；目录切换整体复位；
+  const tkeyOf = (e: FsEntry) => {
+    const a = api.active();
+    const src = a.kind === "server" ? `${a.serverId ?? ""}|${a.rootId}` : a.rootId;
+    return `${src}/${e.path}@${String(e.mtime)}`;
+  };
+  const thumbKeyOf = (e: FsEntry): string | undefined =>
+    !e.isDir && viewableType(e) === "image" ? tkeyOf(e) : undefined;
+
   const [thumbs, setThumbs] = useState<Record<string, string | null>>({});
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const ioRef = useRef<IntersectionObserver | null>(null);
+  const queueRef = useRef<string[]>([]);
+  const runningRef = useRef(0);
+  const settledRef = useRef<Set<string>>(new Set());
+  const attemptsRef = useRef<Map<string, number>>(new Map());
+  const entriesRef = useRef<Map<string, FsEntry>>(new Map());
+  const timersRef = useRef<number[]>([]);
 
   useEffect(() => {
     setSel(new Set());
@@ -87,36 +114,89 @@ export default function FileView(p: Props) {
     setKindFilter("");
   }, [p.path, p.rootName, p.isServer]);
 
-  // 网格缩略图懒加载（0.2.1 全量显示）：凡 viewableType==="image"（含相机 RAW）
-  // 都出图——Rust 侧统一生成 ≤512px 缓存缩略图（fs_thumb/srv_thumb），不再受
-  // 旧 4MiB/2MiB data URL 上限约束；大小图与 RAW 无需点眼睛即可见（眼睛预览保留）。
-  // 并发池 3：服务端大文件/RAW 首次会整文件入媒体缓存，限流避免一次拉爆带宽。
+  // key→entry 索引（entries 变化即刷新；调度循环据此取条目）
   useEffect(() => {
-    if (p.viewMode !== "grid") return;
-    let cancelled = false;
-    const src = api.source();
-    const targets = p.entries.filter((e) => viewableType(e) === "image").slice(0, 60);
-    let i = 0;
-    const worker = async () => {
-      while (!cancelled && i < targets.length) {
-        const e = targets[i++];
-        if (thumbs[e.path] !== undefined) continue;
-        let s: string | null = null;
-        try {
-          const path = await src.thumbPath(e);
-          if (path) s = convertFileSrc(path);
-        } catch {
-          s = null;
-        }
-        if (!cancelled) setThumbs((prev) => ({ ...prev, [e.path]: s }));
-      }
-    };
-    void Promise.all([worker(), worker(), worker()]);
-    return () => {
-      cancelled = true;
-    };
+    const m = new Map<string, FsEntry>();
+    for (const e of p.entries) {
+      const k = thumbKeyOf(e);
+      if (k) m.set(k, e);
+    }
+    entriesRef.current = m;
+    dispatchThumbs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [p.viewMode, p.entries]);
+  }, [p.entries]);
+
+  // 目录/来源切换：队列、结算表、观察器全部复位（防粘旧图、防跨目录串图）
+  useEffect(() => {
+    setThumbs({});
+    queueRef.current = [];
+    settledRef.current = new Set();
+    attemptsRef.current = new Map();
+    for (const t of timersRef.current) clearTimeout(t);
+    timersRef.current = [];
+    if (ioRef.current) {
+      ioRef.current.disconnect();
+      ioRef.current = null;
+    }
+  }, [p.path, p.rootName, p.isServer]);
+
+  // 卸载清理
+  useEffect(() => {
+    return () => {
+      ioRef.current?.disconnect();
+      ioRef.current = null;
+      for (const t of timersRef.current) clearTimeout(t);
+      timersRef.current = [];
+    };
+  }, []);
+
+  function settleThumb(key: string, v: string | null) {
+    settledRef.current.add(key);
+    setThumbs((prev) => ({ ...prev, [key]: v }));
+  }
+
+  function dispatchThumbs() {
+    while (runningRef.current < 3 && queueRef.current.length > 0) {
+      const key = queueRef.current.shift()!;
+      if (settledRef.current.has(key)) continue;
+      const e = entriesRef.current.get(key);
+      if (!e) continue; // 条目已被移除（刷新后消失）：丢弃
+      if (api.isAnonymous()) {
+        // 游客：/thumb 与旧预览通道一律需登录（匿名语义未变）——立即图标，不重试
+        settledRef.current.add(key);
+        setThumbs((prev) => ({ ...prev, [key]: null }));
+        continue;
+      }
+      runningRef.current++;
+      void (async () => {
+        try {
+          const path = await api.source().thumbPath(e);
+          if (!path) {
+            settleThumb(key, null); // Rust 明示无缩略图：图标回退，不重试
+            return;
+          }
+          const url = await thumbBlobUrl(key, path);
+          settleThumb(key, url);
+        } catch (err) {
+          const n = (attemptsRef.current.get(key) ?? 0) + 1;
+          attemptsRef.current.set(key, n);
+          if (n <= 3) {
+            const delay = [2000, 8000, 30000][n - 1];
+            const h = window.setTimeout(() => {
+              if (!settledRef.current.has(key)) queueRef.current.push(key);
+              dispatchThumbs();
+            }, delay);
+            timersRef.current.push(h);
+          } else {
+            settleThumb(key, null); // 连续失败：本轮放弃，条目更新（mtime 变）可再来
+          }
+        } finally {
+          runningRef.current--;
+          dispatchThumbs();
+        }
+      })();
+    }
+  }
 
   const filtered = useMemo(() => {
     const lq = q.trim().toLowerCase();
@@ -146,6 +226,32 @@ export default function FileView(p: Props) {
     }
     return KIND_ORDER.filter((k) => map.has(k)).map((k) => [k, map.get(k)!] as [string, FsEntry[]]);
   }, [filtered, p.groupByKind]);
+
+  // 渲染后把带 data-tkey 的卡片挂进观察器（IO 对当前相交状态会立刻回调一次；
+  // 必须在 filtered/groups 之后注册——deps 直接引用这两个派生值）
+  useLayoutEffect(() => {
+    if (p.viewMode !== "grid") return;
+    const root = pageRef.current;
+    if (!root) return;
+    if (!ioRef.current && typeof IntersectionObserver !== "undefined") {
+      ioRef.current = new IntersectionObserver(
+        (es) => {
+          for (const en of es) {
+            if (!en.isIntersecting) continue;
+            const k = (en.target as HTMLElement).dataset.tkey;
+            if (k && !settledRef.current.has(k) && !queueRef.current.includes(k)) {
+              queueRef.current.push(k);
+            }
+          }
+          dispatchThumbs();
+        },
+        // 上下各预取 2 屏（需求3"向上向下各缓存 2[屏]"）：margin 为 root 高的百分比
+        { root, rootMargin: "200% 0px 200% 0px" }
+      );
+    }
+    root.querySelectorAll<HTMLElement>("[data-tkey]").forEach((el) => ioRef.current?.observe(el));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.viewMode, filtered, groups]);
 
   const selEntries = filtered.filter((e) => sel.has(e.path));
   const toggle = (e: FsEntry, multi: boolean) => {
@@ -250,7 +356,7 @@ export default function FileView(p: Props) {
   );
 
   return (
-    <div className="page">
+    <div className="page" ref={pageRef}>
       <div className="crumbs">
         <button className="crumb" onClick={() => p.onBreadcrumb("")}>
           <IconHome size={14} /> {p.rootName}
@@ -384,6 +490,7 @@ export default function FileView(p: Props) {
                     entries={list}
                     sel={sel}
                     thumbs={thumbs}
+                    tkeyOf={thumbKeyOf}
                     onToggle={toggle}
                     onOpen={p.onOpen}
                     onPreview={p.onPreview}
@@ -401,6 +508,7 @@ export default function FileView(p: Props) {
               entries={filtered}
               sel={sel}
               thumbs={thumbs}
+              tkeyOf={thumbKeyOf}
               onToggle={toggle}
               onOpen={p.onOpen}
               onPreview={p.onPreview}

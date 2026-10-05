@@ -7,7 +7,7 @@
 //   由一条组行聚合进度，并发池限流（默认 3），暂停/继续/取消/重试作用于整组。
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { ServerSource } from "./server";
+import { ServerSource, srvCall } from "./server";
 import { getConfig } from "./api";
 import { uid } from "./types";
 import type { TransferTask } from "./transtypes";
@@ -128,7 +128,13 @@ async function run(id: string) {
           baseHash = "-";
         }
       }
-      await source.uploadFile(t.localPath, dirOf(t.remotePath), id, baseHash);
+      await source.uploadFile(
+        t.localPath,
+        dirOf(t.remotePath),
+        id,
+        baseHash,
+        t.group && t.journalRel ? { gid: t.group, rel: t.journalRel } : null
+      );
     } else {
       await source.downloadFile(t.localPath, t.remotePath, id);
     }
@@ -140,9 +146,11 @@ async function run(id: string) {
     const cur = tasks.get(id);
     if (!cur) return;
     if (cur.status === "paused" || cur.status === "cancelled") return; // 事件已落状态
-    if (msg.includes("已暂停")) patch(id, { status: "paused" });
-    else if (msg.includes("取消")) patch(id, { status: "cancelled" });
-    else if (msg.includes("conflict") || msg.includes("已存在"))
+    // 0.3.2：按 Rust 的 FM_* 前缀路由（弃中文串嗅探——服务端错误文案含"取消"
+    // 等字样的误分类是旧隐患）；旧无前缀消息保留文本兜底以兼容过渡期。
+    if (msg.startsWith("FM_PAUSE:") || msg.includes("已暂停")) patch(id, { status: "paused" });
+    else if (msg.startsWith("FM_CANCEL:") || msg.includes("已取消")) patch(id, { status: "cancelled" });
+    else if (msg.startsWith("FM_CONFLICT:") || msg.includes("conflict") || msg.includes("已存在"))
       patch(id, { status: "error", message: "目标已存在或已被他人修改——可勾选覆盖重试" });
     else if (msg.startsWith("AUTH_REQUIRED")) patch(id, { status: "error", message: "登录已失效，重新登录后重试" });
     else patch(id, { status: "error", message: msg });
@@ -230,10 +238,13 @@ export interface GroupChildSpec {
   localPath: string;
   size: number;
   baseHash?: string;
+  /** 0.3.2：上传账本 rel_path（组任务 id=账本 gid；缺省=不入账） */
+  journalRel?: string;
 }
 
 /** 入队一个目录上传组：子任务只进注册表（不进 order=不进 UI 快照），
- *  由一条组行聚合展示；并发池限流（默认 3）避免整棵树同时开传。 */
+ *  由一条组行聚合展示；并发池限流（默认 3）避免整棵树同时开传。
+ *  skipped=0.3.2 预检判定"远端已相同"的文件数（不入队，仅组行文案展示）。 */
 export function enqueueGroup(o: {
   id: string;
   label: string;
@@ -241,6 +252,7 @@ export function enqueueGroup(o: {
   rootId: string;
   children: GroupChildSpec[];
   concurrency?: number;
+  skipped?: number;
 }): void {
   const rec: GroupRec = {
     id: o.id, childIds: [], pending: [], running: 0,
@@ -251,7 +263,7 @@ export function enqueueGroup(o: {
     const task: TransferTask = {
       id: uid(), kind: "upload", serverId: o.serverId, rootId: o.rootId,
       name: c.name, remotePath: c.remotePath, localPath: c.localPath,
-      baseHash: c.baseHash, group: o.id,
+      baseHash: c.baseHash, group: o.id, journalRel: c.journalRel,
       status: "queued", sent: 0, total: c.size, speed: 0, message: "",
     };
     tasks.set(task.id, task); // 注意：不 unshift 进 order（UI 快照只含组行）
@@ -262,7 +274,7 @@ export function enqueueGroup(o: {
     id: o.id, kind: "upload", serverId: o.serverId, rootId: o.rootId,
     name: o.label, remotePath: "", localPath: "", isGroup: true,
     status: "queued", sent: 0, total: o.children.reduce((s, c) => s + c.size, 0), speed: 0, message: "",
-    files: 0, filesTotal: o.children.length,
+    files: 0, filesTotal: o.children.length, skipped: o.skipped,
   };
   tasks.set(row.id, row);
   order.unshift(row.id);
@@ -303,22 +315,24 @@ function settle(gid: string) {
   const speed = ch.reduce((s, t) => s + (t.status === "running" ? t.speed : 0), 0);
   let status: TransferTask["status"] = "running";
   let message = "";
+  const skipTxt = row.skipped ? `，跳过 ${row.skipped} 个相同文件` : "";
   if (over === ch.length) {
     if (errs === 0 && canc === 0) {
       status = "done";
-      message = `${done}/${ch.length} 个文件`;
+      message = `${done}/${ch.length} 个文件${skipTxt}`;
     } else if (canc === ch.length) {
       status = "cancelled";
       message = "已取消";
     } else {
       status = "error";
-      message = `${done}/${ch.length} 个文件成功` + (errs ? `，${errs} 个失败` : "") + (canc ? `，${canc} 个已取消` : "");
+      message = `${done}/${ch.length} 个文件成功` + (errs ? `，${errs} 个失败` : "") + (canc ? `，${canc} 个已取消` : "") + skipTxt;
     }
   } else if (runCnt === 0 && g.pending.length === 0) {
     if (paused > 0) { status = "paused"; message = "已暂停"; }
     else if (queued > 0) status = "queued";
   }
   patch(gid, { status, message, sent, total: Math.max(row.total, sent), speed, files: over, filesTotal: ch.length });
+  syncGroupDb(gid, status);
 }
 
 export async function pauseGroup(gid: string) {
@@ -373,6 +387,104 @@ export function retryGroup(gid: string) {
     if (!g.pending.includes(id)) g.pending.push(id);
   }
   pump(gid);
+}
+
+// ---------- 0.3.2 上传账本联动（重启续传兜底，需求清单第 2 条） ----------
+
+/** 组行状态变化落账本（去抖：只在终态语义变化时写）。error/paused/queued/running
+ *  统一记 active——账本语义是"未完成、可续"，done/canceled 才终态。 */
+const groupDbStatus = new Map<string, string>();
+function syncGroupDb(gid: string, status: TransferStatus) {
+  const s = status === "done" ? "done" : status === "cancelled" ? "canceled" : "active";
+  if (groupDbStatus.get(gid) === s) return;
+  groupDbStatus.set(gid, s);
+  void invoke("lg_group_status", { gid, status: s }).catch(() => {});
+}
+
+/** 账本组行（lg_list_pending/lg_group_info 的 JS 形态，Rust camelCase 序列化）。 */
+export interface JournalGroupRow {
+  gid: string;
+  label: string;
+  serverId: string;
+  rootId: string;
+  localAbs: string;
+  remotePrefix: string;
+  status: string;
+  totalFiles: number;
+  doneFiles: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface JournalItemRow {
+  relPath: string;
+  name: string;
+  localPath: string;
+  remotePath: string;
+  size: number;
+  mtimeMs: number;
+  sha: string;
+  sessionId: string;
+  state: string;
+}
+
+/** 未完成组列表（TransfersView 呈现；账本不存在/异常返回空，不阻塞 UI）。 */
+export async function listJournalPending(): Promise<JournalGroupRow[]> {
+  try {
+    return (await invoke<JournalGroupRow[]>("lg_list_pending")) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** 继续一个未完成的账本组：同 gid 重建子任务入队（done 条目跳过；服务端会话
+ *  仍在则自动断点续传，会话已废则全新开始——0.2.1 服务端命中坏会话会自建新会话）。 */
+export async function resumeJournalGroup(g: JournalGroupRow): Promise<void> {
+  let items: JournalItemRow[] = [];
+  try {
+    items = (await invoke<JournalItemRow[]>("lg_group_items", { gid: g.gid })) ?? [];
+  } catch {
+    return;
+  }
+  const todo = items.filter((i) => i.state !== "done" && i.state !== "canceled");
+  if (todo.length === 0) {
+    await invoke("lg_group_status", { gid: g.gid, status: "done" }).catch(() => {});
+    return;
+  }
+  groupDbStatus.set(g.gid, "active");
+  enqueueGroup({
+    id: g.gid,
+    label: g.label || "目录上传",
+    serverId: g.serverId,
+    rootId: g.rootId,
+    children: todo.map((i) => ({
+      name: i.name,
+      remotePath: i.remotePath,
+      localPath: i.localPath,
+      size: i.size,
+      // failed 可能因远端已存在（上次已完成但状态没落账）→ 覆盖语义（服务端
+      // 覆盖前存版本）；pending/paused 仍按新文件断言（会话命中自动续传，
+      // 未命中且真冲突时组"重试"仍可覆盖）。
+      baseHash: i.state === "failed" ? "" : "-",
+      journalRel: i.relPath,
+    })),
+  });
+}
+
+/** 放弃一个未完成组：作废服务端残留会话（清 staging 碎片）+ 账本置 canceled。 */
+export async function abandonJournalGroup(g: JournalGroupRow): Promise<void> {
+  let items: JournalItemRow[] = [];
+  try {
+    items = (await invoke<JournalItemRow[]>("lg_group_items", { gid: g.gid })) ?? [];
+  } catch {
+    items = [];
+  }
+  for (const i of items) {
+    if (i.sessionId && i.state !== "done") {
+      await srvCall(g.serverId, "DELETE", `/api/v1/upload/session?id=${encodeURIComponent(i.sessionId)}`).catch(() => {});
+    }
+  }
+  await invoke("lg_group_status", { gid: g.gid, status: "canceled" }).catch(() => {});
 }
 
 /** UI 快照已不含子任务；此 API 留给后续"展开组行看明细"。 */

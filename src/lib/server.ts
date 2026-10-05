@@ -50,6 +50,37 @@ export async function serverMkdirs(serverId: string, rootId: string, paths: stri
   }
 }
 
+// ---------- 0.3.2 目录重传预检（POST /api/v1/check，Server ≥0.2.1） ----------
+
+export interface CheckFile {
+  path: string;
+  size: number;
+  hash?: string;
+}
+
+export type CheckState = "missing" | "same" | "differ" | "unknown";
+
+export interface CheckResult {
+  path: string;
+  state: CheckState;
+}
+
+/** 批量校验远端文件（相同跳过/不同询问的服务端支撑）。500/批同 mkdirs 骨架。
+ *  端点缺失（旧服务端）由调用方经 isMissingEndpoint 判定后退化为无预检旧流程。 */
+export async function serverCheck(serverId: string, rootId: string, files: CheckFile[]): Promise<CheckResult[]> {
+  const BATCH = 500;
+  const out: CheckResult[] = [];
+  for (let i = 0; i < files.length; i += BATCH) {
+    const batch = files.slice(i, i + BATCH).map((f) => (f.hash ? f : { path: f.path, size: f.size }));
+    const d = await srvCall<{ results?: CheckResult[] }>(serverId, "POST", "/api/v1/check", {
+      rootId,
+      files: batch,
+    });
+    out.push(...(d.results ?? []));
+  }
+  return out;
+}
+
 interface ServerFileVersion {
   id: number;
   versionNo: number;
@@ -152,22 +183,27 @@ export class ServerSource implements DataSource {
     }) as Promise<string>;
   }
 
-  async thumbPath(entry: FsEntry): Promise<string | null> {
-    // 0.2.1：Rust 生成 ≤512px 缩略图路径（大图/RAW 经媒体缓存后缩放，RAW 取
-    // 内嵌预览；大文件会先把整文件拉入媒体缓存——与眼睛预览共享，看过一次秒出）
-    try {
-      return (await invoke("srv_thumb", {
-        serverId: this.serverId,
-        rootId: this.rootId,
-        path: entry.path,
-        ver: String(entry.mtime),
-      })) as string;
-    } catch {
-      return null;
-    }
+  thumbPath(entry: FsEntry): Promise<string | null> {
+    // 0.3.2：Rust 优先走服务端 GET /thumb（浏览零下载——不再整文件入媒体缓存），
+    // 旧服务端/服务端不可解码时自动回退旧管线（≤8MiB 整文件入缓存交浏览器自绘）。
+    // size_hint=entry.size 供 Rust 判定回退闸门。null=永久无缩略图；抛错=瞬时
+    // 失败（FileView 队列退避重试）。
+    return invoke("srv_thumb", {
+      serverId: this.serverId,
+      rootId: this.rootId,
+      path: entry.path,
+      ver: String(entry.mtime),
+      sizeHint: entry.size,
+    }) as Promise<string | null>;
   }
 
-  async uploadFile(localPath: string, dir: string, transferId: string, baseHash?: string): Promise<void> {
+  async uploadFile(
+    localPath: string,
+    dir: string,
+    transferId: string,
+    baseHash?: string,
+    journal?: { gid: string; rel: string } | null
+  ): Promise<void> {
     await invoke("srv_upload", {
       serverId: this.serverId,
       rootId: this.rootId,
@@ -175,6 +211,8 @@ export class ServerSource implements DataSource {
       localPath,
       transferId,
       baseHash: baseHash ?? null,
+      journalGid: journal?.gid ?? null,
+      journalRel: journal?.rel ?? null,
     });
   }
 

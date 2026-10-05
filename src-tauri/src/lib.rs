@@ -1,8 +1,10 @@
 //! FileManage 客户端 Rust 侧入口：
-//! config（配置）/ localdb（本地元数据 sqlite）/ localfs（本地目录+版本+媒体缓存）/
-//! serverapi（分片传输+会话续期）/ ai（本地 AI）/ thumb（缩略图与 RAW 内嵌预览提取）。
+//! config（配置）/ localdb（本地元数据 sqlite + 上传账本）/ localfs（本地目录+版本+媒体缓存）/
+//! serverapi（分片传输+会话续期）/ ai（本地 AI）/ thumb（缩略图与 RAW 内嵌预览提取）/
+//! cachemgr（媒体缓存磁盘配额 LRU，0.3.2）。
 
 mod ai;
+mod cachemgr;
 mod config;
 mod localdb;
 mod localfs;
@@ -128,7 +130,19 @@ pub fn run() {
             let st = std::sync::Arc::new(config::AppState::load(dir, cache)?);
             // 本地回收站过期自动清理（0.4.0，需求：30 天，与服务端各自独立；启动时执行一次）
             localfs::purge_expired_trash(&st);
+            // 0.3.2：上传账本清理（终态超 7 天的组/条目回收）+ 媒体缓存计数初始化
+            // 与一次配额淘汰（上次退出遗留的孤儿 .part/.raw-src 也在此回收）
+            {
+                let guard = st.db.lock();
+                if let Ok(db) = guard {
+                    let _ = localdb::journal_prune(&db);
+                }
+            }
+            cachemgr::init_counter(&st);
+            cachemgr::enforce(&st);
             app.manage(st);
+            // 媒体缓存周期巡检（300s：过期断点碎片 + 超限 LRU 淘汰）
+            cachemgr::spawn_sweeper(&app.handle().clone());
             // 托盘常驻（需求2）：托盘不可用绝不使启动失败——关闭按钮按配置直接退出
             match build_tray(app) {
                 Ok(()) => TRAY_OK.store(true, Ordering::SeqCst),
@@ -176,6 +190,17 @@ pub fn run() {
             localfs::fs_export,
             localfs::fs_media_cache,
             localfs::fs_thumb,
+            // 0.3.2：目录重传校验（本地哈希）+ 缓存体系（字节读/用量/清空）
+            localfs::fs_file_hashes,
+            cachemgr::media_read_bytes,
+            cachemgr::cache_stats,
+            cachemgr::cache_clear,
+            // 0.3.2：上传账本（重启续传兜底）
+            localdb::lg_new_group,
+            localdb::lg_set_children,
+            localdb::lg_list_pending,
+            localdb::lg_group_items,
+            localdb::lg_group_status,
             // 本地版本管理（需求13）
             localfs::fs_versions_list,
             localfs::fs_versions_rollback,

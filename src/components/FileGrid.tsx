@@ -8,9 +8,12 @@ import { kindIcon, IconEye } from "./icons";
 interface Props {
   entries: FsEntry[];
   sel: Set<string>;
-  /** path → 缩略图 src（0.2.1：媒体缓存 ≤512px 图的 asset URL，RAW 为内嵌
-   *  预览提取缩放；null=无缩略图，用类型图标） */
+  /** tkey → 缩略图 src（0.3.2：tkey=path@mtime；值为 thumbcache 内存 LRU 的
+   *  blob: URL——字节不再走 asset 协议直挂；undefined=未就绪/null=无缩略图，
+   *  用类型图标） */
   thumbs: Record<string, string | null>;
+  /** 可出缩略图条目的 tkey（viewableType==="image"），非图像返回 undefined */
+  tkeyOf(e: FsEntry): string | undefined;
   onToggle(e: FsEntry, multi: boolean): void;
   /** 双击=查看 */
   onOpen(e: FsEntry): void;
@@ -24,10 +27,14 @@ export default function FileGrid(p: Props) {
   return (
     <div className="grid-view">
       {p.entries.map((e) => {
-        const thumb = p.thumbs[e.path];
+        const tk = p.tkeyOf(e);
+        const thumb = tk ? p.thumbs[tk] : undefined;
         return (
           <div
             key={e.path}
+            // data-tkey：0.3.2 IntersectionObserver 视口调度锚点（FileView 的
+            // IO 只观察带此属性的卡片；上下各 2 屏进入即排队出图）
+            data-tkey={tk}
             className={p.sel.has(e.path) ? "grid-item selected" : "grid-item"}
             onClick={(ev) => p.onToggle(e, ev.ctrlKey || ev.metaKey)}
             onDoubleClick={() => p.onOpen(e)}

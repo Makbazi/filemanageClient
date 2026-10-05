@@ -128,6 +128,7 @@ pub fn ensure_thumb(st: &AppState, key: &str, src: &Path) -> Result<PathBuf, Str
     let _ = fs::create_dir_all(&dir);
     let dest = dir.join(thumb_name(key));
     if dest.exists() {
+        crate::cachemgr::touch(&dest); // 命中=访问（0.3.2 LRU 标记；.thumb.jpg 恒 nlink=1）
         return Ok(dest);
     }
     let jpeg = fs::read(src).map_err(|e| format!("读取失败: {e}"))?;
@@ -140,5 +141,7 @@ pub fn ensure_thumb(st: &AppState, key: &str, src: &Path) -> Result<PathBuf, Str
     enc.write_image(rgb.as_raw(), rgb.width(), rgb.height(), ExtendedColorType::Rgb8)
         .map_err(|e| format!("缩略图编码失败: {e}"))?;
     fs::write(&dest, &out).map_err(|e| format!("缩略图写入失败: {e}"))?;
+    crate::cachemgr::note_new_file(out.len() as u64);
+    crate::cachemgr::maybe_enforce(st);
     Ok(dest)
 }

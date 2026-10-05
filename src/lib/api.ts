@@ -16,6 +16,7 @@ import type {
 import type { DataSource } from "./datasource";
 import { LocalSource } from "./local";
 import { ServerSource, srvCall } from "./server";
+import { setThumbBudgetMb } from "./thumbcache";
 import { AuthError } from "./errors";
 
 export { AuthError };
@@ -42,6 +43,7 @@ function defaultConfig(): AppConfig {
     transfer: { uploadLimitKbps: 0, downloadLimitKbps: 0 },
     trashRetentionDays: 30,
     credentials: [],
+    cache: { maxDiskMb: 10240, maxMemMb: 2048 },
   };
 }
 
@@ -59,11 +61,13 @@ function normalize(c: AppConfig): AppConfig {
     ui: { ...base.ui, ...(c.ui ?? {}) },
     transfer: { ...base.transfer, ...(c.transfer ?? {}) },
     trashRetentionDays: c.trashRetentionDays && c.trashRetentionDays > 0 ? c.trashRetentionDays : 30,
+    cache: { ...base.cache, ...(c.cache ?? {}) },
   };
 }
 
 export async function loadConfig(): Promise<AppConfig> {
   cfg = normalize((await invoke("get_config")) as AppConfig);
+  setThumbBudgetMb(cfg.cache.maxMemMb); // 0.3.2：缩略图内存 LRU 预算随配置生效
   return cfg;
 }
 
@@ -73,6 +77,7 @@ export function getConfig(): AppConfig {
 
 export async function saveConfig(next: AppConfig): Promise<AppConfig> {
   cfg = normalize((await invoke("save_config", { config: next })) as AppConfig);
+  setThumbBudgetMb(cfg.cache.maxMemMb);
   return cfg;
 }
 

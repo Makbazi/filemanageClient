@@ -46,4 +46,9 @@ export interface TransferTask {
   /** 需求41：组行已完成（含失败/取消）文件数 与 总文件数。 */
   files?: number;
   filesTotal?: number;
+  /** 0.3.2：目录重传预检判定的"相同跳过"文件数（不入队、不占 filesTotal）。 */
+  skipped?: number;
+  /** 0.3.2：组内子任务在上传账本中的 rel_path（组任务 id 即账本 gid；
+   *  Rust srv_upload 据此回写 session_id/终态——重启后"继续未完成的上传组"）。 */
+  journalRel?: string;
 }

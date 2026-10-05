@@ -107,6 +107,17 @@ export interface AppConfig {
   trashRetentionDays: number;
   /** 已记住密码的 服务端+账户 索引（0.6.0 需求3） */
   credentials: CredRef[];
+  /** 媒体/缩略图缓存配额（0.3.2，需求3/4/5） */
+  cache: CacheConf;
+}
+
+/** 媒体/缩略图缓存配额（0.3.2）：磁盘上限由 Rust LRU 执行、内存上限由前端
+ *  thumbcache.ts LRU 执行；磁盘条目跨程序退出保留。 */
+export interface CacheConf {
+  /** 磁盘缓存上限 MB（默认 10240 = 10GB） */
+  maxDiskMb: number;
+  /** 缩略图内存缓存上限 MB（默认 2048 = 2GB） */
+  maxMemMb: number;
 }
 
 export interface ServerRoot {
