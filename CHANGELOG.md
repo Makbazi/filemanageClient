@@ -10,13 +10,38 @@
 
 | filemanageClient | 配套 filemanageServer | 说明 |
 |---|---|---|
-| 0.3.0（当前） | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.1 兼容关系**零变更、数据协议零变更**：H.264/H.265 播放 = WebView 原生**系统解码器**（Windows Media Foundation / Linux GStreamer）+ 可配置**外部播放器**兜底（字节仍取既有 `GET /api/v1/preview` 媒体缓存通道，Server 不感知）；托盘常驻/关窗行为/单实例/`open_media`·`test_player_command` 均为客户端本地 Rust 行为，不跨进程。Linux 托盘运行期依赖 appindicator（deb depends `libayatana-appindicator3-1`） |
+| 0.3.1（当前） | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | **纯构建体系修复，功能与兼容关系与 0.3.0 完全一致、数据协议零变更、产物代码零变更**：win10 交叉编译镜像补装 `libayatana-appindicator3-dev`——tauri-cli 在 Linux 宿主开启 tray-icon 特性后无条件探测 appindicator（判宿主机不判 `--target`），0.3.0 的 NSIS 打包因此崩溃（Jenkins #48），本版本修复后 Windows 产物正常产出 |
+| 0.3.0 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.1 兼容关系**零变更、数据协议零变更**：H.264/H.265 播放 = WebView 原生**系统解码器**（Windows Media Foundation / Linux GStreamer）+ 可配置**外部播放器**兜底（字节仍取既有 `GET /api/v1/preview` 媒体缓存通道，Server 不感知）；托盘常驻/关窗行为/单实例/`open_media`·`test_player_command` 均为客户端本地 Rust 行为，不跨进程。Linux 托盘运行期依赖 appindicator（deb depends `libayatana-appindicator3-1`）。⚠️ 该 tag 的 windows10 产物因编译环境探测崩溃未产出，由 0.3.1 修复 |
 | 0.2.1 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.0 兼容关系**零变更、数据协议零变更**：网格缩略图全量显示与相机 RAW（NEF/CR2/ARW/RAF…）查看/预览均为客户端本地 Rust 行为——字节仍取自既有 `GET /api/v1/preview` 媒体缓存通道（同端点同权限、匿名语义不变，需求6 无新增面）；新增 `fs_thumb`、`srv_thumb` 改版（改返回媒体缓存缩略图路径、加 ver）属本地 Rust 命令契约，不跨进程。目录上传仍依赖 Server ≥0.2.0 |
 | 0.2.0 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 需求41 目录上传：本地模式右键目录 → Rust `fs_walk` 递归枚举（跳符号链接与 `.fmtrash`，深度 64/条目 20000 硬上限，超限整体拒绝绝不传半棵树）→ `POST /api/v1/mkdirs` 一次建好远端目录骨架（含空目录；配 Server <0.2.0 自动退化为逐个 `mkdir`，幂等递归语义一致、仅往返更多）→ 逐文件入队上传（并发池 3 限流），传输 UI 整目录聚合为一条组行（总字节进度 + 文件计数，暂停/继续/取消/重试整组粒度；冲突文件经组"重试"按覆盖语义重跑——服务端覆盖前先存版本，需求3）；其余功能承接 0.1.7 零变更 |
 | 0.1.1–0.1.7 | 0.1.x（当时推荐；当前 Server 0.1.1）；0.7.x/0.6.x/0.5.x 亦可用 | 兼容关系承接 0.1.6 不变（数据协议零变更：查看/预览分离与大图内联查看为纯客户端 UI/本地上屏缓存行为，图片取字节由 data URL 改走**既有** `/api/v1/preview` 端点的媒体缓存通道，服务端无感；`fs_media_cache`/`srv_media_cache` 新增可选 `ver` 参数属本地 Rust 命令契约，不跨进程）。0.1.6 仅修复 Windows 本地目录路径校验误报（纯客户端本地行为），数据协议零变更。0.1.5 新增设置页"关于"页签与页头版本号显示，纯 UI 行为、数据协议零变更（"配套服务端"一栏为兼容矩阵静态文案，不产生新的接口依赖）。新增账户页自助改密（需 Server ≥0.1.0 的 `/auth/change-password`；配旧服务端时该按钮报 404/405，其余功能不变）。0.7.x/0.6.x 服务端下家目录虚拟根、jail 语义与登录态处理同 0.6.1。**Server 0.1.1（文件存储驱动、管理台切换/导出/暂停）为服务端存储与管理面增项，数据协议零变更，本客户端无感兼容（仅更新本兼容列表，代码不动）**。Client 0.1.1–0.1.6 为构建体系与客户端本地修复/改版（baseUrl 协议头归一、连接错误透出、对话框层级修复、设置全屏页、关于页版本信息、Windows 本地目录校验修复），0.1.7 为查看/预览分离 + 大图查看 + 查看器全屏，均纯 UI/本地行为，数据协议零变更，对本矩阵无影响 |
 | ≤0.6.1 | 0.5.x–0.7.x | 见 git 历史（已按需求39清空） |
 
 ## 未发布版本
+
+### 构建体系：win10 交叉镜像补装 appindicator 开发包（2026-10-05，0.3.1；数据协议零变更/产物代码零变更）
+- **症状**（Jenkins filemanageClient_pipeline #48，tag v0.3.0）：三个 Linux 环境产物齐出；
+  windows10 环境 `x86_64-pc-windows-gnu` exe 编译成功后，NSIS 打包阶段崩溃——
+  `tauri-cli/src/interface/rust.rs:1722 panicked: Can't detect any appindicator library`。
+- **根因**：0.3.0 启用 `tauri` 的 `tray-icon` 特性后，tauri-cli 2.11.4（上游 dev 分支实测
+  亦未修）在 Linux 宿主打包时，只要 manifest 开启该特性就**无条件**用 pkg-config 探测
+  appindicator——该代码块门控是宿主机的 `#[cfg(target_os="linux")]`，与 `--target`/
+  `--bundles` 无关；两个 .pc 皆缺即 panic。探测结果只写进 deb Depends/AppImage 附带
+  文件，对 NSIS 产物无影响，但探测本身不可跳过（`TAURI_LINUX_AYATANA_APPINDICATOR`
+  两个取值分支同样要求 pkg-config 成功）。三个 Linux 镜像因编译链接真依赖已装
+  `libayatana-appindicator3-dev` 故通过；win10 交叉镜像此前不装（Windows 目标不链 GTK），
+  被宿主机侧探测连带炸出。
+- **修复**：`build-env/Dockerfile.ubuntu22.04-win10` 在 rust 层之后新增独立层安装
+  `libayatana-appindicator3-dev`（前序 apt/node/rust 缓存层不失效；仅供 CLI 探测，
+  不参与 Windows 链接）。详见 build-env/README.md「win10 镜像为何也装了 appindicator」。
+- **生效前提（维护者人工步骤）**：镜像须重建并推送 harbor——`./build.sh -i -a windows10`
+  → `docker push harbor.localserver.com:9080/filemanage/filemanage-client-build:ubuntu22.04-win10`；
+  CI `-n` 按 tag 拉取，推送前流水线仍复现旧症。
+- **版本**：经维护者决策本修复记为 **0.3.1**（需求19，三处版本清单 + Cargo.lock
+  0.3.0 → 0.3.1）；应用代码零变更、数据协议零变更，兼容矩阵完全承接 0.3.0。
+  0.3.0 tag 的 windows10 产物因此缺陷未能产出（流水线 #48），发版以 0.3.1 重打 tag。
+- **本地实测通过**：重建后的 win10 镜像 `./build.sh -a windows10` 越过原 panic 点完成
+  NSIS 打包，出 `release/filemanageClient_windows10_0.3.1.exe`（PE 检查正常）。
 
 ### 新增：H.264/H.265 视频播放 + 系统托盘常驻（2026-10-04，0.3.0；数据协议零变更）
 - **需求原句**：需求1——支持 h264、h265 视频播放，调用系统解码器或者可配置视频解码器；需求2——新增托盘常住，可在设置里设置按叉后是退出程序还是在托盘，默认在托盘。

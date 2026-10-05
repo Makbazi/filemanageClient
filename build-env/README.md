@@ -30,6 +30,24 @@ Windows 10+（微软官方策略），即 Tauri 2 的 Windows 产物天然最低
 **产物命名（`windows10` 平台标签）+ 本文档与 CHANGELOG 声明**落实，不改动应用
 代码、不自定义 NSIS 模板。
 
+## win10 镜像为何也装了 appindicator 开发包（0.3.0 tray-icon 连带，Jenkins #48 实测）
+
+`tauri` 启用 `tray-icon` 特性后，tauri-cli 2.11.4（上游 dev 分支亦未修）在 **Linux 宿主**
+打包时，只要工程 manifest 开着该特性，就无条件用 pkg-config 探测
+`ayatana-appindicator3-0.1`/`appindicator3-0.1`——**该探测块门控是宿主机的
+`#[cfg(target_os = "linux")]`，与 `--target`/`--bundles` 完全无关**，两个 .pc 都找不到
+即 panic `Can't detect any appindicator library`（症状：Windows exe 编译全部成功，NSIS
+打包阶段崩）。探测结果只写进 deb Depends / AppImage 附带文件，对 NSIS 产物无实际影响，
+但无法跳过（`TAURI_LINUX_AYATANA_APPINDICATOR` 的两个取值分支同样要求 pkg-config 成功）。
+三个 Linux 镜像本就装 `libayatana-appindicator3-dev`（编译链接真需要）故无此症；win10
+交叉镜像的 Windows 目标不链接 GTK，但 CLI 宿主机侧探测照样命中，故该 Dockerfile 在
+rust 层之后以**独立层**补装同一包——仅供探测、不参与 Windows 链接，前序
+apt/node/rust 缓存层不失效。
+
+镜像改动生效前提（CI 走 `-n` 按 tag 拉 harbor）：本地 `./build.sh -i -a windows10`
+重建后 `docker push harbor.localserver.com:9080/filemanage/filemanage-client-build:ubuntu22.04-win10`，
+否则 CI 继续拉旧镜像复现 panic。
+
 ## 使用
 
 常规入口（宿主机执行，需 docker；镜像缺失自动构建）：
