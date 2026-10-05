@@ -95,17 +95,14 @@ export class LocalSource implements DataSource {
     }) as Promise<string>;
   }
 
-  async thumbPath(entry: FsEntry): Promise<string | null> {
-    // 0.2.1：Rust 生成 ≤512px 缩略图路径（RAW 取内嵌预览）；失败/不支持回退图标
-    try {
-      return (await invoke("fs_thumb", {
-        rootId: this.rootId,
-        path: entry.path,
-        ver: String(entry.mtime),
-      })) as string;
-    } catch {
-      return null;
-    }
+  thumbPath(entry: FsEntry): Promise<string | null> {
+    // 0.2.1：Rust 生成 ≤512px 缩略图路径（RAW 取内嵌预览）。0.3.2 语义：null=
+    // 永久无缩略图（Rust 显式返回），抛错=瞬时失败（调用方退避重试）。
+    return invoke("fs_thumb", {
+      rootId: this.rootId,
+      path: entry.path,
+      ver: String(entry.mtime),
+    }) as Promise<string | null>;
   }
 
   async uploadFile(localPath: string, dir: string, transferId: string): Promise<void> {

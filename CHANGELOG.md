@@ -10,7 +10,8 @@
 
 | filemanageClient | 配套 filemanageServer | 说明 |
 |---|---|---|
-| 0.3.1（当前） | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | **纯构建体系修复，功能与兼容关系与 0.3.0 完全一致、数据协议零变更、产物代码零变更**：win10 交叉编译镜像补装 `libayatana-appindicator3-dev`——tauri-cli 在 Linux 宿主开启 tray-icon 特性后无条件探测 appindicator（判宿主机不判 `--target`），0.3.0 的 NSIS 打包因此崩溃（Jenkins #48），本版本修复后 Windows 产物正常产出 |
+| 0.3.2（当前） | **0.2.x（推荐；当前 Server 0.2.1）**；配 Server ≤0.2.0 逐条自动退化（下行"退化矩阵"） | 本批用户清单 1/2/3/4/5/6 条（上传中断兜底+缩略图体系）。**依赖 Server 0.2.1 两个新端点的功能均为可选加速面**：`GET /thumb`（网格浏览零下载——只回缩略图字节不再整文件入缓存）；`POST /check`（目录重传预检：相同跳过/同名不同内容弹窗询问）。404（旧服务端）时：缩略图自动走 0.2.1 旧管线（整文件入缓存后本地缩放，现受 10GB LRU 约束）、目录重传回到 0.2.0 冲突语义（全量重传+409 覆盖重试）。**与新增端点无关的断连修复对配任何版本服务端都生效**：分片重试、complete 移出 120s 超时通道+断连轮询（本批主根因修复）、坏会话 DELETE 重建、取消作废服务端会话、GET/DELETE /upload/session 接线（端点 0.1.x 起即有）。新增本地能力：上传账本（localdb user_version 2，重启续传）、磁盘缓存 ≤10GB LRU+孤儿清理+设置页用量/清空、缩略图内存 ≤2GB blob LRU+IntersectionObserver 视口调度（可见±2 屏，全量无 60 上限）；新 Rust 依赖 sha2（锁内 0.10.9 提为直接依赖，零新下载）；CSP/capabilities 零改动（blob: 已在 img-src，字节走 IPC ArrayBuffer 不 fetch asset） |
+| 0.3.1 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | **纯构建体系修复，功能与兼容关系与 0.3.0 完全一致、数据协议零变更、产物代码零变更**：win10 交叉编译镜像补装 `libayatana-appindicator3-dev`——tauri-cli 在 Linux 宿主开启 tray-icon 特性后无条件探测 appindicator（判宿主机不判 `--target`），0.3.0 的 NSIS 打包因此崩溃（Jenkins #48），本版本修复后 Windows 产物正常产出 |
 | 0.3.0 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.1 兼容关系**零变更、数据协议零变更**：H.264/H.265 播放 = WebView 原生**系统解码器**（Windows Media Foundation / Linux GStreamer）+ 可配置**外部播放器**兜底（字节仍取既有 `GET /api/v1/preview` 媒体缓存通道，Server 不感知）；托盘常驻/关窗行为/单实例/`open_media`·`test_player_command` 均为客户端本地 Rust 行为，不跨进程。Linux 托盘运行期依赖 appindicator（deb depends `libayatana-appindicator3-1`）。⚠️ 该 tag 的 windows10 产物因编译环境探测崩溃未产出，由 0.3.1 修复 |
 | 0.2.1 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.0 兼容关系**零变更、数据协议零变更**：网格缩略图全量显示与相机 RAW（NEF/CR2/ARW/RAF…）查看/预览均为客户端本地 Rust 行为——字节仍取自既有 `GET /api/v1/preview` 媒体缓存通道（同端点同权限、匿名语义不变，需求6 无新增面）；新增 `fs_thumb`、`srv_thumb` 改版（改返回媒体缓存缩略图路径、加 ver）属本地 Rust 命令契约，不跨进程。目录上传仍依赖 Server ≥0.2.0 |
 | 0.2.0 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 需求41 目录上传：本地模式右键目录 → Rust `fs_walk` 递归枚举（跳符号链接与 `.fmtrash`，深度 64/条目 20000 硬上限，超限整体拒绝绝不传半棵树）→ `POST /api/v1/mkdirs` 一次建好远端目录骨架（含空目录；配 Server <0.2.0 自动退化为逐个 `mkdir`，幂等递归语义一致、仅往返更多）→ 逐文件入队上传（并发池 3 限流），传输 UI 整目录聚合为一条组行（总字节进度 + 文件计数，暂停/继续/取消/重试整组粒度；冲突文件经组"重试"按覆盖语义重跑——服务端覆盖前先存版本，需求3）；其余功能承接 0.1.7 零变更 |
@@ -18,6 +19,76 @@
 | ≤0.6.1 | 0.5.x–0.7.x | 见 git 历史（已按需求39清空） |
 
 ## 未发布版本
+
+### 修复+新增：上传中断兜底 + 缩略图全显与双层缓存 + 浏览零下载（2026-10-06，0.3.2；配 Server 0.2.1 新端点，对旧服务端逐条退化）
+- **需求原句**（用户 2026-10 清单，含服务端事故日志 PUT /upload/chunk 卡 2m33s 后 connection reset）：
+  ①上传目录时连接断开要修；②中断后再次上传同一目录需相同文件校验、制定兜底机制（未完成的怎么恢复、
+  不能用的碎片怎么处理）；③缩略图按可见±2屏缓存、内存≤2GB、磁盘≤10GB、查看/打开目录不得触发下载；
+  ④缓存清理更新机制；⑤目录图片再多也要全量显示；⑥汇总上述；⑦版本号 0.3.2。
+  决策（维护者确认）：相同自动跳过/不同弹窗询问；查看允许临时落盘纳入上限淘汰；磁盘缓存跨退出保留。
+- **断连根因与修复（serverapi.rs，本批主修）**：①`client_for` 的 **120s 总超时罩住
+  `POST /upload/complete`**——大文件服务端合并超 2 分钟被客户端掐、服务端其实替换成功、重试撞
+  409 冲突风暴：complete 改独立提交（stream client + 15min 上限），任何"没拿到响应"的失败
+  **不重发**（合并期会话恒 uploading，重发=双合并竞态），改 `GET /upload/session?id=` 每 5s 轮询
+  ≤15min 判 completed（404=会话已过期报"重新上传"）；②chunk PUT 零重试+无读超时：put_chunk 网络类
+  失败（传输层/408/429/5xx）≤3 次退避 1/2/4s 重试（服务端按 index 幂等覆盖安全），4xx 语义错误直返；
+  ③每请求新建 reqwest Client 无连接复用：改按 (地址|TLS|用途) 缓存复用 + tcp_keepalive(30s)/nodelay
+  （半开悬挂秒级暴露）；④会话命中旧参数死锁：create 后校验 chunkCount==ceil(size/chunkSize)，
+  不符 `DELETE /upload/session` 重建（配旧服务端也生效）；⑤**取消（非暂停）尽力 DELETE 会话**，
+  服务端 staging 碎片即时回收（旧行为任其挂到 7 天僵尸清理）；⑥错误分类弃中文串嗅探：Rust 给
+  `FM_PAUSE:/FM_CANCEL:/FM_CONFLICT:/FM_NET:` 前缀（事件展示剥离），transfer.ts 按前缀路由（保留
+  下载旧中文串兜底）。
+- **目录重传：校验+续传+账本兜底（App.tsx/transfer.ts/localdb.rs）**：
+  **预检管线**（配 Server ≥0.2.1；旧服务端 404 整体跳过预检走 0.2.0 原流程）：fs_walk →
+  `POST /check` pass1（不带 hash，missing 直传/differ 进询问/same 跳过/unknown 进 pass2）→
+  unknown 集 `fs_file_hashes`（新命令，sha2 流式 SHA-256，与服务端同算法）→ pass2 →
+  {skipSame 不入队；missing baseHash="-"；unknown（无哈希证据的大小相符存量）baseHash="" 覆盖
+  语义上传（服务端覆盖前仍存版本，需求3）；differ 弹窗}→ **新对话框 `uploadDiff`**（Modals.tsx：
+  逐行覆盖/跳过+全部覆盖/全部跳过+取消=中止该服务端本目录上传）→ serverMkdirs → enqueueGroup
+  （组行注"跳过 N 个"）。**上传账本**（localdb `PRAGMA user_version` 1→2）：`upload_groups`
+  （gid=组任务 id/服务端/根/本地目录/前缀/status/done_files）+ `upload_items`（rel/name/本地与远端
+  路径/size/sha/session_id/state）——组创建由 TS 写（lg_new_group/lg_set_children），会话 id 与条目
+  终态由 Rust upload_inner 回写（Mutex 短事务不跨 await）；取消→canceled、暂停→pending（可续）、
+  失败→failed、完成→done；组终态由 settle 同步（error/paused 保持 active=可续语义）。
+  **重启续传**：TransfersView 顶部"未完成的上传组"（lg_list_pending，已在内存任务表的 gid 不重复
+  显示）→[继续]=按 items 重建子任务入组（done 跳过；failed 用覆盖语义；服务端活动会话命中自动
+  断点续传，0.2.1 服务端坏会话自建新会话）→[放弃]=逐 session DELETE 清 staging。账本终态组 7 天
+  启动清扫（journal_prune）。
+- **缩略图全显（FileView/FileGrid/thumbcache）**：删 `slice(0,60)` 硬上限——**可见±2 屏**
+  IntersectionObserver（root=.page，rootMargin "200% 0px 200% 0px"）驱动的无上限优先级队列，
+  并发 3；键 `来源标识/path@mtime`（多根多服务端防撞、覆盖自动重取）；失败退避 2s/8s/30s ≤3 轮
+  才落图标（`thumbPath` 契约改：null=永久无图不重试，**抛错=瞬时可重试**）；目录切换全量复位
+  （修旧 path 键粘图/粘失败）。**内存 ≤2GB**：新 `lib/thumbcache.ts` Map<blobUrl> LRU，字节经新
+  命令 `media_read_bytes`（`tauri::ipc::Response` 原始字节零 base64 膨胀；canonicalize+媒体目录
+  前缀纵深，同 player.rs）建 Blob——**不用 fetch(convertFileSrc)**：CSP connect-src 不含 asset 协议
+  且双平台 URL 形态不一；img-src 已含 blob: → **CSP 零改动**。预算 cfg.cache.maxMemMb 经
+  loadConfig/saveConfig 同步。
+- **磁盘 ≤10GB LRU + 清理更新（新 Rust 模块 cachemgr.rs）**：touch-on-serve（仅本进程自有拷贝：
+  .thumb.jpg/RAW 提取 .jpg/服务端下载条目；**本地模式 hard_link 条目绝不 touch**——与源文件同
+  inode，淘汰 unlink 只断链接不伤源数据）；原子字节计数（启动全量扫描校准）+ 写入点超限即淘汰 +
+  300s 周期巡检；按 mtime 升序淘汰至 90% 上限；`*.part`/`*.raw-src`/`*.thumb.jpg.tmp` 孤儿
+  mtime>24h 随巡检回收；**跨程序退出保留**（维护者确认）。设置→传输：磁盘/内存上限可配
+  （CacheConf{maxDiskMb=10240, maxMemMb=2048}，serde default+api.ts normalize）+ 用量显示 +
+  **清空缓存**（cache_stats/cache_clear 命令，清空联动清内存 blob）。
+- **浏览零下载（srv_thumb 改造，核心需求6）**：优先 `GET /api/v1/thumb`（Server 0.2.1）→ 只回
+  ≤512px JPEG 落缓存 `<key_hash>.thumb.jpg`——**网格浏览不再整文件入媒体缓存**；退化链：404（旧
+  服务端）→ 整条 0.2.1 旧管线（整文件入缓存后本地缩放——接受面已受 10GB LRU 约束）；413/415/429
+  且 size_hint≤8MiB（webp/heic/svg 等服务端不可解码/繁忙的小文件）→ 旧管线回浏览器自绘；>8MiB →
+  图标（前端队列稍后自动重试）。429 客户端退避 2s/4s 共 3 试。双击查看/眼睛预览通道不变
+  （srv_media_cache 整文件，维护者确认边界：查看允许临时落盘、纳入上限自动淘汰）。本地模式
+  fs_thumb 不变（本地文件不存在"下载"语义）。
+- **已知边界/后续**：游客浏览 public 目录仍无缩略图（/thumb 与 /preview 同守卫、匿名 401——语义
+  承接 0.2.1 未变，需求6）；预检跳过的"相同"仅限 size+SHA-256 双证；账本不覆盖单文件上传（仅
+  目录组）；本地模式 hard_link 条目 LRU 按创建序非访问序；Server 0.2.1 的 /thumb 与旧管线对
+  同一文件可能给出不同画质（服务端盒式缩放 vs 本地 image 库 Lanczos——目测级差异，接受）。
+- **依赖/权限**：Cargo.toml 新增 `sha2 = "0.10"`（锁内 0.10.9 传递依赖提为直接依赖，零新下载，
+  纯 Rust 四平台交叉无系统库）；TS 零新包；tauri.conf.json CSP/capabilities **零改动**（已核验
+  img-src 含 blob:、IPC 走既有 ipc:）。新增 Rust 命令：`fs_file_hashes`/`media_read_bytes`/
+  `cache_stats`/`cache_clear`/`lg_new_group`/`lg_set_children`/`lg_list_pending`/
+  `lg_group_items`/`lg_group_status`——均本地命令契约，不跨进程。
+- **版本**：三处版本源 0.3.1 → **0.3.2**（需求19）。数据协议：对 Server ≥0.2.1 新增两个可选端点
+  调用（加性）、对既有端点零改动；配 Server ≤0.2.0 逐条退化为 0.3.1/0.2.0 行为。推荐配套
+  **Server 0.2.1**。
 
 ### 构建体系：win10 交叉镜像补装 appindicator 开发包（2026-10-05，0.3.1；数据协议零变更/产物代码零变更）
 - **症状**（Jenkins filemanageClient_pipeline #48，tag v0.3.0）：三个 Linux 环境产物齐出；

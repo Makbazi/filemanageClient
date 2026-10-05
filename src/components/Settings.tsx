@@ -6,10 +6,13 @@
 // 页头右侧同时常驻显示版本号——版本一律取 Tauri 运行时元数据（非 import 常量），
 // 因此与 build.sh -V 注入的产物版本一致（该通道不改三处版本源文件）。
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getName, getTauriVersion, getVersion } from "@tauri-apps/api/app";
 import type { AIProvider, AppConfig, RootConf, ServerConf, ServerRoot } from "../lib/types";
 import { uid } from "../lib/types";
+import { fmtSize } from "../lib/format";
+import { clearThumbCache } from "../lib/thumbcache";
 import {
   active,
   credForget,
@@ -50,8 +53,12 @@ export default function Settings(p: Props) {
     ai: { ...p.cfg.ai },
     ui: { ...p.cfg.ui },
     transfer: { ...p.cfg.transfer },
+    cache: { ...p.cfg.cache },
   });
   const [saving, setSaving] = useState(false);
+  // 0.3.2：媒体/缩略图缓存用量（进"传输"页签时刷新）与清空状态
+  const [cacheStats, setCacheStats] = useState<{ files: number; bytes: number; limitBytes: number } | null>(null);
+  const [clearing, setClearing] = useState(false);
   const [srvForm, setSrvForm] = useState<{ idx: number; conf: ServerConf } | null>(null);
   // 明文 http 保存前的二次确认（0.4.0 安全升级）
   const [httpWarn, setHttpWarn] = useState<ServerConf | null>(null);
@@ -174,6 +181,16 @@ export default function Settings(p: Props) {
   };
   const trSet = (patch: Partial<AppConfig["transfer"]>) =>
     setCfg({ ...cfg, transfer: { ...cfg.transfer, ...patch } });
+  const cacheSet = (patch: Partial<AppConfig["cache"]>) =>
+    setCfg({ ...cfg, cache: { ...cfg.cache, ...patch } });
+
+  // 0.3.2：进"传输"页签拉一次媒体缓存用量
+  useEffect(() => {
+    if (tab !== "transfer") return;
+    invoke<{ files: number; bytes: number; limitBytes: number }>("cache_stats")
+      .then(setCacheStats)
+      .catch(() => setCacheStats(null));
+  }, [tab]);
 
   const commitPlayer = () => {
     const v = playerDraft.trim();
@@ -452,6 +469,68 @@ export default function Settings(p: Props) {
               onChange={(e) => setCfg({ ...cfg, trashRetentionDays: Math.max(1, Number(e.target.value) || 30) })}
             />
           </div>
+
+          {/* 0.3.2 媒体/缩略图缓存（需求3/4/5）：磁盘 LRU 上限 + 内存预算 + 用量/清空 */}
+          <h3 className="form-section">媒体/缩略图缓存</h3>
+          <div className="field">
+            <label>磁盘缓存上限（MB，默认 10240 = 10GB）</label>
+            <input
+              type="number"
+              min={256}
+              value={cfg.cache.maxDiskMb}
+              onChange={(e) => cacheSet({ maxDiskMb: Math.max(256, Number(e.target.value) || 10240) })}
+            />
+          </div>
+          <div className="field">
+            <label>缩略图内存缓存上限（MB，默认 2048 = 2GB）</label>
+            <input
+              type="number"
+              min={64}
+              value={cfg.cache.maxMemMb}
+              onChange={(e) => cacheSet({ maxMemMb: Math.max(64, Number(e.target.value) || 2048) })}
+            />
+          </div>
+          <p className="dim tip">
+            缓存内容：网格缩略图、图片/视频预览与查看落盘（跨程序退出保留，超限按最久未访问自动淘汰；
+            本地模式的链接条目不会移动/删除你的源文件）。
+            {cacheStats && (
+              <>
+                {" "}
+                当前用量 <b>{fmtSize(cacheStats.bytes)}</b>（{cacheStats.files} 个条目），
+                上限 {fmtSize(cacheStats.limitBytes)}。
+              </>
+            )}
+          </p>
+          <div className="toolbar-inline">
+            <button
+              className="btn"
+              onClick={() =>
+                void invoke<{ files: number; bytes: number; limitBytes: number }>("cache_stats")
+                  .then(setCacheStats)
+                  .catch(() => setCacheStats(null))
+              }
+            >
+              刷新用量
+            </button>
+            <button
+              className="btn danger"
+              disabled={clearing}
+              onClick={() => {
+                setClearing(true);
+                void invoke("cache_clear")
+                  .then(() => {
+                    clearThumbCache();
+                    return invoke<{ files: number; bytes: number; limitBytes: number }>("cache_stats");
+                  })
+                  .then(setCacheStats)
+                  .catch(() => {})
+                  .finally(() => setClearing(false));
+              }}
+            >
+              清空缓存
+            </button>
+          </div>
+
           <button className="btn primary" onClick={() => persist(cfg)} disabled={saving}>
             保存传输设置
           </button>

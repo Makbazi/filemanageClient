@@ -210,6 +210,37 @@ pub struct TransferConf {
     pub download_limit_kbps: u32,
 }
 
+/// 媒体/缩略图缓存配额（0.3.2 需求3/4/5）：
+/// - 磁盘：媒体缓存目录（缩略图/预览/查看落盘）总上限，Rust LRU 按 mtime 淘汰执行；
+///   跨程序退出保留复用（设置页可手动清空）。
+/// - 内存：缩略图字节 blob 缓存预算，前端 thumbcache.ts 读取执行。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheConf {
+    /// 磁盘缓存上限 MB（默认 10240 = 10GB）
+    #[serde(default = "default_cache_disk_mb")]
+    pub max_disk_mb: u64,
+    /// 缩略图内存缓存上限 MB（默认 2048 = 2GB）
+    #[serde(default = "default_cache_mem_mb")]
+    pub max_mem_mb: u64,
+}
+
+fn default_cache_disk_mb() -> u64 {
+    10240
+}
+fn default_cache_mem_mb() -> u64 {
+    2048
+}
+
+impl Default for CacheConf {
+    fn default() -> Self {
+        Self {
+            max_disk_mb: default_cache_disk_mb(),
+            max_mem_mb: default_cache_mem_mb(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -231,6 +262,9 @@ pub struct AppConfig {
     /// 已记住密码的服务端账户索引（0.6.0 需求3；密码本体在系统凭证库）
     #[serde(default)]
     pub credentials: Vec<CredRef>,
+    /// 媒体/缩略图缓存配额（0.3.2 需求3/4/5）
+    #[serde(default)]
+    pub cache: CacheConf,
 }
 
 impl Default for AppConfig {
@@ -244,6 +278,7 @@ impl Default for AppConfig {
             transfer: TransferConf::default(),
             trash_retention_days: default_trash_days(),
             credentials: Vec::new(),
+            cache: CacheConf::default(),
         }
     }
 }

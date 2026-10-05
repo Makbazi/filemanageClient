@@ -20,13 +20,19 @@ src/App.tsx            根组件：状态编排、对话框调度（Dialog 判�
 src/lib/
   datasource.ts        DataSource 接口（唯一数据访问契约）
   local.ts             本地实现（invoke fs_* 命令）
-  server.ts            服务端实现（srv_call + srv_* 传输命令；0.2.0 serverMkdirs 批量建目录+旧服务端退化逐个 mkdir）
+  server.ts            服务端实现（srv_call + srv_* 传输命令；0.2.0 serverMkdirs 批量建目录+旧服务端退化逐个 mkdir；0.3.2 serverCheck 目录重传预检（500/批，旧服务端 isMissingEndpoint 退化）；thumbPath 契约：null=永久无图、抛错=瞬时重试）
   api.ts               配置单例(loadConfig/saveConfig/active) + source() 工厂 + 分享/ACL/AI 辅助
   transfer.ts          任务注册表（入队/暂停/续传/重试 + "fm-transfer" 事件归并，
                        未入队 transferId 首个事件自动注册为展示任务）+ 订阅；
                        0.2.0 目录上传组任务（enqueueGroup 子任务不进 order/并发池 3/
-                       组级 pause-resume-cancel-retry/rowActions 统一选路）
-  transtypes.ts        TransferTask/TransferStatus 共享契约（状态串 = Rust 事件）
+                       组级 pause-resume-cancel-retry/rowActions 统一选路）；
+                       0.3.2 FM_* 前缀错误路由、组终态落上传账本（syncGroupDb 去抖）、
+                       resumeJournalGroup/abandonJournalGroup/listJournalPending 重启续传 API
+  transtypes.ts        TransferTask/TransferStatus 共享契约（状态串 = Rust 事件；
+                       0.3.2 +skipped 组行跳过计数、+journalRel 账本 rel 坐标）
+  thumbcache.ts        0.3.2 缩略图内存 LRU（≤cfg.cache.maxMemMb=2GB 默认）：键=来源标识+
+                       path@mtime，media_read_bytes IPC 字节→Blob→objectURL，超限按访问序
+                       revoke；预算由 api.loadConfig/saveConfig 同步 setThumbBudgetMb
   theme.ts             THEMES 注册 + applyTheme(data-theme)
   types.ts format.ts errors.ts(AuthError)
   preview.ts           viewableType 查看/预览统一类型判定 + 文本解码 + RAW_EXT + VIDEO_EXT
@@ -52,25 +58,54 @@ src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView Tra
                        与"视频播放（H.264/H.265）"radio+外部播放器命令输入（Enter/失焦提交）+
                        测试按钮，均 uiSet 即时持久化；FileViewer/PreviewModal 视频 onError 兜底
                        面板 + openMedia 外部播放入口，FileViewer 增 decoder prop）
+                       （0.3.2：FileView/FileGrid 缩略图 IntersectionObserver 视口调度——
+                       可见±2 屏全量出图（废除前 60 上限）、path@mtime+来源键、失败退避重试、
+                       thumbcache blob 上屏；Modals 新 UploadDiffDialog（目录重传同名不同内容
+                       逐行覆盖/跳过+全选按钮）；App.uploadDirToServers 预检管线（/check 两遍
+                       +fs_file_hashes+弹窗询问+账本 lg_* 登记，旧服务端自动退化）；
+                       TransfersView 顶部"未完成的上传组 [继续][放弃]"（lg_list_pending，
+                       已在内存任务表的 gid 不重复显示）；Settings→传输：媒体/缩略图缓存
+                       上限可配+用量显示+清空）
 src/styles/            base.css（组件）+ themes.css（5 套主题变量）
-src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/player 的 command 注册 +
+src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/player/cachemgr 的 command 注册 +
                        启动清理；0.3.0：TrayIconBuilder 托盘（菜单=显示主窗口/退出，左键仅唤醒——
                        Linux appindicator 不派发点击事件，菜单为主路径）+ CloseRequested 按
                        ui.closeAction 拦截隐藏（TRAY_OK/QUITTING 原子标志，托盘失败绝不炸启动）+
-                       tauri-plugin-single-instance 最先注册（重复启动唤起已有窗口）)
+                       tauri-plugin-single-instance 最先注册（重复启动唤起已有窗口）；
+                       0.3.2：setup 中 journal_prune（账本终态超 7 天回收）+ cachemgr::init_counter/
+                       启动一次 enforce/300s 巡检任务；新注册 fs_file_hashes、media_read_bytes、
+                       cache_stats、cache_clear、lg_new_group/lg_set_children/lg_list_pending/
+                       lg_group_items/lg_group_status)
                        config.rs(AppConfig: localRoots/servers(caFile)/ai/active/ui(sidebarCollapsed/
                                   closeAction=tray|quit(默认tray)/videoDecoder=system|external(默认system)/
                                   videoPlayerCmd(0.3.0))/transfer/trashRetentionDays；keyring_ok；
-                                  update() 统一做令牌同步凭证库+config.json 脱敏)
+                                  update() 统一做令牌同步凭证库+config.json 脱敏；
+                                  0.3.2 cache{maxDiskMb=10240(10GB),maxMemMb=2048(2GB)} serde default)
                        secret.rs(系统凭证库 keyring：token 存取/探测/删除；不可用时回退明文并提示)
                        localdb.rs(本地元数据 sqlite：ai_descriptions/trash_items/file_versions/
                                   analysis_tasks；open_and_migrate 幂等迁移 user_version；
-                                  旧 *.json 首次启动自动导入后改名 *.imported)
+                                  旧 *.json 首次启动自动导入后改名 *.imported；
+                                  0.3.2 user_version 1→2 上传账本 upload_groups/upload_items——
+                                  组（gid=组任务 id/服务端/根/本地目录/前缀/status/done_files）与
+                                  条目（rel/本地远端路径/size/sha/session_id/state）；Rust
+                                  upload_inner 回写会话与终态（Mutex 短事务禁跨 await），
+                                  journal_prune 启动回收终态超 7 天组)
                        localfs.rs(防逃逸 fs_* + 本地版本库 + kind_of(0.3.0 视频扩展表扩 hevc/h265/h264/
                                   m2ts/mpg…，不含 ts)+ fs_import/export + fs_walk(0.2.0 目录树枚举，需求41) +
-                                  fs_media_cache(0.1.7 起带可选 ver 版本串入缓存键；0.2.1 RAW 存提取的内嵌预览 .jpg) +
-                                  fs_thumb(0.2.1 网格缩略图：媒体缓存 ≤512px .thumb.jpg 路径))
-                       serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache(同 ver，0.2.1 同 RAW 分支；内部 srv_media_ensure)/preview_data + srv_thumb(0.2.1 改版：加 ver、返回缩略图路径) + transfer_cancel)
+                                  fs_media_cache(0.1.7 起带可选 ver 版本串入缓存键；0.2.1 RAW 存提取的内嵌预览 .jpg；
+                                  0.3.2 hard_link 命中不 touch（保源文件 mtime）、新条目登记 cachemgr) +
+                                  fs_thumb(0.2.1 网格缩略图：媒体缓存 ≤512px .thumb.jpg 路径) +
+                                  fs_file_hashes(0.3.2 sha2 流式 SHA-256 批量哈希，目录重传预检 pass2 用，
+                                  逐条容错 null=读失败))
+                       serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache(同 ver，0.2.1 同 RAW 分支；内部 srv_media_ensure)/preview_data + srv_thumb(0.2.1 改版：加 ver、返回缩略图路径；0.3.2 优先服务端 GET /thumb——浏览零下载，404/413/415/429 按 size_hint≤8MiB 回退旧管线) + transfer_cancel；
+                                  0.3.2 断连大修：reqwest Client 按(地址|TLS|用途)缓存复用+
+                                  tcp_keepalive30s/nodelay、put_chunk 网络类失败≤3 退避(1/2/4s)、
+                                  会话创建后 chunkCount 校验不符 DELETE 重建、complete 移出 srv_call
+                                  120s 通道(stream client+15min 上限)且失败**不重发**改轮询
+                                  GET /upload/session(id=) 判 completed(5s 间隔≤15min)、取消(非暂停)
+                                  尽力 DELETE /upload/session 清服务端 staging、错误加
+                                  FM_PAUSE:/FM_CANCEL:/FM_CONFLICT:/FM_NET: 前缀(事件展示剥离)、
+                                  srv_upload 新增 journal_gid/journal_rel 参数回写上传账本)
                        thumb.rs(0.2.1 相机 RAW：is_raw_ext 品牌扩展表 + extract_preview 字节级最大内嵌 JPEG
                                   提取（SOI 扫描 + 段链校验至 EOI，熵数据/progressive 合法，垃圾候选拒绝）+
                                   ensure_thumb image 缩放 ≤512px JPEG 入媒体缓存)
@@ -80,6 +115,14 @@ src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/p
                                   Windows CREATE_NO_WINDOW、spawn 分离) + test_player_command(设置页
                                   测试：开缓存最新视频或 0 字节 fmc-selftest.mp4 探测，返回实际路径))
                        ai.rs(本地 AI)
+                       cachemgr.rs(0.3.2 媒体/缩略图磁盘缓存 ≤cfg.cache.maxDiskMb LRU：
+                                  touch-on-serve 仅限本进程自有拷贝（hard_link nlink 与源文件
+                                  共享 mtime，绝不 touch）、原子字节计数（启动扫描校准）、
+                                  写点超限即 enforce+300s 周期巡检、按 mtime 升序淘汰至 90%、
+                                  *.part/*.raw-src/*.thumb.jpg.tmp mtime>24h 孤儿回收、
+                                  跨程序退出保留；cache_stats/cache_clear 设置页入口；
+                                  media_read_bytes IPC 原始字节命令（canonicalize+媒体目录前缀
+                                  纵深，tauri::ipc::Response 免 base64，供前端 blob 内存层）)
 ```
 
 ## 开发命令
@@ -134,6 +177,17 @@ cd src-tauri && cargo check
    `mkdir`），文件走 `transfer.enqueueGroup` 组任务——子任务只注册不进 UI 快照、
    并发池限流、一条组行聚合进度，暂停/继续/取消/重试为组级（冲突子任务组重试
    按覆盖语义）；UI 不得绕过 `rowActions` 直接调单任务 API。
+   **0.3.2 断连/兜底契约**：①错误分类走 Rust 前缀 `FM_PAUSE:/FM_CANCEL:/FM_CONFLICT:/FM_NET:`
+   （fm-transfer 事件 message 已剥离前缀，invoke 异常带前缀——TS 侧嗅前缀，禁止再嗅中文文案；
+   下载通道的"已暂停/已取消"旧中文串保留兜底）；②`POST /upload/complete` **绝不走 srv_call**
+   （120s 总超时=本批事故根因）：走 stream client+15min，失败**只轮询 `GET /upload/session?id=`
+   判 completed，禁止重发 complete**（合并期会话恒 uploading，重发=双合并竞态）；③分片 PUT
+   网络类失败 ≤3 退避重试（服务端按 index 幂等）；④取消（非暂停）尽力 `DELETE /upload/session`
+   清服务端 staging，暂停保留会话续传；⑤目录组任务必须登记上传账本（lg_new_group/
+   lg_set_children 先于 enqueueGroup，条目 journalRel=fs_walk relPath），Rust upload_inner
+   回写 session_id 与终态；组 error/paused 账本保持 active（可续语义），done/cancelled 落终态，
+   启动 journal_prune 回收终态超 7 天组；重启续传走 transfer.resumeJournalGroup（done 跳过、
+   failed 用覆盖语义 baseHash ""）。
 6. **配置**：AppConfig 变更必须给默认值（config.rs serde default + api.ts normalize），
    兼容旧 config.json。
 7. **主题**：颜色一律用 CSS 变量（themes.css），组件样式禁止硬编码色值；
@@ -145,9 +199,10 @@ cd src-tauri && cargo check
    `thumb.rs::is_raw_ext` 同表）归入 image，媒体缓存存的是 Rust 从文件提取的**最大
    内嵌 JPEG 预览**（`.jpg`，非原始字节），查看/预览/缩略图共享该条目；不得改为整文件
    入缓存再 `<img>` 直挂。网格缩略图一律 `thumbPath`（fs_thumb/srv_thumb → 媒体缓存
-   ≤512px `.thumb.jpg` 路径 → convertFileSrc；null 回退图标），大图与 RAW 无需点眼睛
-   即可见（眼睛/角标/右键预览入口保留）；服务端模式首过整文件入缓存属已接受代价
-   （与预览共享），并发池 3 限流。
+   ≤512px `.thumb.jpg` 路径；**0.3.2 起前端经 media_read_bytes 建 blob 上屏、走约定 9
+   的双层缓存，不再 convertFileSrc**；null=永久无图标回退、抛错=瞬时重试），大图与
+   RAW 无需点眼睛即可见（眼睛/角标/右键预览入口保留）；服务端模式**浏览不再整文件
+   入缓存**（0.3.2 服务端 /thumb；配旧服务端才回退 0.2.1 整文件管线），并发池 3 限流。
    预览＝PreviewModal 缩放弹窗（"缩略图"观感，入口＝眼睛/角标/右键"预览"）；
    查看＝FileViewer 主区覆盖层（入口＝双击/右键"查看"，双击图片/Esc/X 关闭，
    全屏＝窗口 `setFullscreen`＋CSS 覆盖层，**禁用 DOM requestFullscreen**——
@@ -161,13 +216,29 @@ cd src-tauri && cargo check
    shell）；`external` 模式查看器自动外起一次（ref 去重）并给 [在本窗口播放] 覆盖，
    **PreviewModal 一律不自动外起只给按钮**；`VIDEO_EXT`（三处同表：preview.ts /
    localfs kind_of / player.rs）**不得纳入 `ts`**（TypeScript 冲突）。不内嵌 ffmpeg。
-9. **版本号三处同步**（需求19），发版时更新 CHANGELOG 兼容矩阵（需求20）。
-10. 编译验证：`npm run build` + `cargo check` 通过即可（需求29，不写测试）；
+9. **媒体/缩略图缓存体系（0.3.2，需求3/4/5/6）**：①**网格浏览绝不整文件拉取**——
+   `srv_thumb` 优先服务端 `GET /api/v1/thumb`（Server ≥0.2.1；守卫同 /preview，匿名语义
+   不变），只有 ≤512px 缩略图字节入媒体缓存；退化链：端点 404（旧服务端）走 0.2.1 旧管线
+   （整文件入缓存+本地缩放，属已接受面、受磁盘配额约束）；413/415/429 且 size_hint≤8MiB
+   旧管线回浏览器自绘；>8MiB 报错由队列退避重试/图标。②**磁盘 ≤cfg.cache.maxDiskMb
+   （默认 10GB）**：cachemgr mtime-LRU（touch-on-serve 仅限自有拷贝——本地 hard_link 条目
+   绝不 touch，unlink 只断链接不伤源文件）、`.part/.raw-src/.thumb.jpg.tmp` 超 24h 孤儿回收、
+   300s 巡检+写点超限即淘汰、跨程序退出保留、设置页用量/清空（cache_stats/cache_clear，
+   清空必须联动 clearThumbCache）。③**缩略图内存 ≤cfg.cache.maxMemMb（默认 2GB）**：
+   `lib/thumbcache.ts` blob LRU，字节经 `media_read_bytes` IPC（`tauri::ipc::Response`
+   ArrayBuffer，**禁止改 fetch(convertFileSrc)**——CSP connect-src 不含 asset 且双平台
+   URL 形态不一；img-src 已含 blob: 故 CSP 零改动）；键=来源标识+path@mtime，覆盖自动
+   重取、多根/多服务端防撞。④查看/预览整文件通道不变（维护者确认边界：双击查看允许临时
+   落盘进缓存、纳入上限自动淘汰；用户手动下载仍走 srv_download 到用户目录）。
+   ⑤FileView 调度契约：thumbPath 返回 null=永久无图（不重试）、抛错=瞬时失败（退避
+   2/8/30s ≤3 轮后落图标）；游客立即图标（与 /preview 匿名语义一致）；目录切换全量复位。
+10. **版本号三处同步**（需求19），发版时更新 CHANGELOG 兼容矩阵（需求20）。
+11. 编译验证：`npm run build` + `cargo check` 通过即可（需求29，不写测试）；
     **不做 git 提交/分支/tag**（需求30）。
-11. **本地元数据一律经 localdb.rs（localdb.sqlite3）**：AI 描述/回收站/版本索引不再
+12. **本地元数据一律经 localdb.rs（localdb.sqlite3）**：AI 描述/回收站/版本索引不再
     写 `*.json`（`config.json` 仍为文件）；`AppState.db` 是 `Mutex<Connection>`，
     **禁止跨 `.await` 持锁**；表结构变更走 `PRAGMA user_version` 迁移链，保持幂等。
-12. **登录态单一事实源（0.6.0 需求1/8）**：服务端 token/refreshToken 与已记住账户
+13. **登录态单一事实源（0.6.0 需求1/8）**：服务端 token/refreshToken 与已记住账户
     凭证（credentials 索引 + keyring 密码）是 **Rust 侧独占的权威状态**——只有
     `srv_login`/`srv_logout`/`srv_change_password`/`try_refresh`/`cred_forget` 可以变更，任何变更必须
     `app.emit("fm-config-changed")`，前端 App 监听该事件同步（loadConfig +
@@ -175,7 +246,7 @@ cd src-tauri && cargo check
     credentials**（禁止恢复旧的 `*c = config` 全量替换——会把已轮换的令牌写回旧值，
     造成"一直刷新/登录框反复弹"）。记住密码按 服务端+账户 隔离存 keyring，
     config.json 永不落密码本体。
-13. **托盘常驻与关窗行为（0.3.0 需求2）**：`ui.closeAction`（默认 **tray**）只影响主
+14. **托盘常驻与关窗行为（0.3.0 需求2）**：`ui.closeAction`（默认 **tray**）只影响主
     窗口 `CloseRequested`——tray 且 `TRAY_OK` 且非 `QUITTING` 时 `prevent_close()+hide()`
     （先退全屏）；**托盘构建失败必须退回退出行为**（绝不静默丢窗口），托盘菜单
     「退出」先置 `QUITTING` 再 `exit(0)`。恢复入口：托盘菜单「显示主窗口」（Linux
@@ -186,7 +257,8 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.3.1（win10 交叉编译环境修复：镜像补装 appindicator 开发包——纯 build-env 变更，产物代码/数据协议零变更）+ 0.3.0（H.264/H.265 视频播放体系 + 系统托盘常驻）+ 0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.0）** / 0.1.x / 0.7.x / 0.6.x（0.3.x 全部为客户端本地行为，兼容关系承接 0.2.1）。
+0.3.2（上传中断兜底 + 缩略图全显与双层缓存 + 浏览零下载）+ 0.3.1（win10 交叉编译环境修复：镜像补装 appindicator 开发包——纯 build-env 变更，产物代码/数据协议零变更）+ 0.3.0（H.264/H.265 视频播放体系 + 系统托盘常驻）+ 0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.1）** / 0.1.x / 0.7.x / 0.6.x。
+**0.3.2（2026-10-06 用户清单 1–6 条；依赖 Server 0.2.1 加性端点，配 ≤0.2.0 逐条退化）**：需求原句——上传目录中途断连要修；中断后重传同一目录要相同文件校验+兜底（未完成恢复/碎片清理）；缩略图可见±2屏缓存、内存≤2GB、磁盘≤10GB、有清理更新机制；图片再多也要全量显示；打开服务端文件/文件夹不得触发下载（查看允许临时落盘纳入上限淘汰——维护者确认；磁盘缓存跨退出保留）。断连主根因与修复：**complete 被 srv_call 120s 总超时掐断→服务端已成功客户端报失败→重试撞 409 风暴**——complete 独立提交（stream client+15min）且断连后只轮询 `GET /upload/session` 判 completed 绝不重发；分片网络级重试（1/2/4s 退避≤3）；reqwest Client 按服务端复用+tcp_keepalive；坏会话（size 变）DELETE 重建；**取消即时 DELETE 会话清 staging**；FM_* 前缀错误路由。**目录重传预检**：`POST /check` 两遍（先 size，unknown 集 `fs_file_hashes` 补 SHA-256 复查）→ 相同自动跳过、同名不同内容 `uploadDiff` 弹窗逐行覆盖/跳过（覆盖 baseHash ""，服务端覆盖前存版本）→ 旧服务端 404 整体退化为 0.2.0 冲突语义。**上传账本**（localdb user_version 2 upload_groups/upload_items）：Rust 回写会话/终态，TransfersView"未完成的上传组 [继续][放弃]"重启续传（done 跳过、failed 覆盖语义、放弃逐 session DELETE），终态组 7 天启动回收。**缩略图体系**：IntersectionObserver（root=.page，rootMargin 上下 2 屏）驱动无上限优先级队列（废除 slice(0,60)；失败退避 2/8/30s ≤3 轮；键=来源标识+path@mtime；目录切换复位）；`srv_thumb` 优先服务端 `/thumb`（**浏览零下载**）；内存 `thumbcache.ts` blob LRU（`media_read_bytes` IPC ArrayBuffer；CSP/capabilities 零改动）；磁盘 `cachemgr.rs` ≤10GB mtime-LRU（hard_link 条目纪律/24h 孤儿回收/300s 巡检/设置页用量+清空）。新增直接依赖 sha2（锁内 0.10.9 提升，零新下载）。三处版本源 0.3.1→0.3.2。
 **0.3.1（2026-10-05 win10 构建环境修复；产物代码零变更、数据协议零变更）**：0.3.0 启用 tauri `tray-icon` 后，tauri-cli 2.11.4 在 Linux 宿主打包时无条件 pkg-config 探测 appindicator（门控是宿主机 `#[cfg(target_os="linux")]`，与 `--target`/`--bundles` 无关；上游 dev 亦未修），win10 交叉镜像缺 dev 包致 NSIS 阶段 panic（Jenkins #48，exe 编译成功）。修复：`build-env/Dockerfile.ubuntu22.04-win10` 在 rust 层后新增独立层装 `libayatana-appindicator3-dev`（仅供 CLI 宿主机侧探测，不参与 Windows 链接；三个 Linux 镜像本就装有）。**契约提醒：win10 镜像必须保留该 dev 包——tauri feature 含 tray-icon 期间删除即复现打包崩溃**；镜像改动需 `./build.sh -i -a windows10` 重建并 push harbor 才对 CI（`-n` 按 tag 拉取）生效。详见 build-env/README.md。
 **0.3.0（2026-10-04 视频播放 + 托盘常驻；数据协议零变更）**：需求原句——支持 h264/h265 视频播放，调用系统解码器或者可配置视频解码器；新增托盘常住，设置里按叉可选退出/进托盘，默认进托盘。视频：`VIDEO_EXT` 并入 `viewableType` video 分支（与 Rust kind_of/player.rs 三处同表，不含 ts）；`FileViewer`/`PreviewModal` 视频挂 `onError` → 缺 HEVC 系统组件提示面板 + [用外部播放器打开]；`ui.videoDecoder=external` 时查看器自动外起一次（可 [在本窗口播放] 覆盖，弹窗不自动起）；新 `player.rs`（`open_media` 限媒体缓存目录、空命令走 opener 系统关联、自定义命令 argv 直起不经 shell、`{file}` 占位、Windows CREATE_NO_WINDOW；`test_player_command` 设置页探测）。托盘：tauri `tray-icon` 特性 + `TrayIconBuilder`（菜单显示/退出，Linux 恢复走菜单——appindicator 不派发点击事件）+ `CloseRequested` 按 `ui.closeAction`（默认 tray；托盘不可用自动退回退出，构建失败不炸启动，`QUITTING` 防再拦截）+ `tauri-plugin-single-instance ~2.4.5`（钉版防 tauri 核/MSRV 悬崖）唤起已有窗口；`bundle.linux.deb.depends` 增 `libayatana-appindicator3-1`。设置→外观两处新配置均 uiSet 即时保存；capabilities 零改动。已知边界：H.265 窗口内播放依赖系统 HEVC 组件（不内嵌 ffmpeg）；隐藏态媒体继续播；服务端模式 external 需整文件先入媒体缓存。
 **0.2.1（2026-10-03 网格缩略图全量显示 + 相机 RAW；数据协议零变更）**：需求原句——按缩略图浏览时也要显示文件内容（图片、以及尼康 NEF 等各品牌 RAW），点不点眼睛都能看（眼睛预览保留）。根因：网格走 `thumbData` data URL（本地 ≤4MiB/srv_thumb ≤2MiB/筛选 ≤8MiB）且过滤 `kind==="image"`，大图与 RAW（kind=other）只剩图标。**新 Rust `thumb.rs`**：`extract_preview` 字节级提取 RAW 内**最大完整 JPEG 预览**（SOI→按段链校验至 EOI，SOS 熵数据只认填充字节/RST/progressive 间 DHT，坏结构候选拒绝——绝不半张图当预览）；`fs_media_cache`/`srv_media_cache` RAW 分支把提取结果存为 `<key_hash>.jpg`（服务端经可续传 scratch 转存后删源）→ 双击查看/眼睛预览自动支持 RAW（零新端点、Server 零改动，字节仍走既有 `/api/v1/preview`，匿名语义不变）；新 `fs_thumb`/改版 `srv_thumb`（加 ver、返回媒体缓存 `<key_hash>.thumb.jpg` ≤512px 路径，svg/heic 等缩放失败且 ≤8MiB 回传原路径）→ `DataSource.thumbData` 替换为 `thumbPath`。前端：`RAW_EXT` 并入 `viewableType` image 分支（kind 不改）、网格 effect 改 `viewableType` 判定去大小上限、并发池 3、`convertFileSrc` 加载；`PreviewModal` 分流统一 `viewableType`。新增依赖 `image` crate（default-features 关，仅常用光栅解码+jpeg 编码）。已知边界：服务端首过整文件入缓存（`$APPCACHE/media` 无淘汰为既有缺口，本批使用面扩大）；RAW 保真=相机内嵌预览（非全精度解码）；缩略图仍限前 60。**0.2.0（2026-10-03 目录上传，需求41；依赖 Server 0.2.0 加性端点 `POST /api/v1/mkdirs`，配旧服务端自动退化逐个 `mkdir`）**：本地模式右键目录 →"上传目录到远程…"——Rust `fs_walk` 递归枚举（符号链接/`.fmtrash` 跳过，深度 64/条目 20000 上限，超限整体拒绝绝不传半棵树）→ `serverMkdirs` 一次建好远端目录骨架（含空目录）→ 逐文件经并发池（3）入组队列；传输 UI **整目录聚合为一条组行**（总字节进度 + `done/total 个文件`，暂停/继续/取消/重试整组粒度；冲突文件组重试按覆盖语义重跑，服务端覆盖前先存版本，需求3）。`UploadToDialog` 新增 `isDir`；transfer.ts 新增 `enqueueGroup/settle/pump/组级 API/rowActions`（子任务只进注册表不进 order，UI 快照天然只见组行；`removeTask/clearFinished` 级联清理子任务）；`watchGroup` 整组终态才一次汇总通知+刷新。已知限制：组内子任务暂不可展开（`getGroupChildren` API 已留）、20000 条硬上限、非 UTF8 文件名沿用 `fs_list` lossy 口径。

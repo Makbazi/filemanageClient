@@ -1,5 +1,6 @@
 // App 根组件：全局状态编排（来源切换/刷新/对话框调度/传输/位置恢复/主题/登录态事件同步）。
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import "./styles/base.css";
@@ -8,9 +9,9 @@ import type { ActiveConf, AppConfig, FsEntry, SearchHit, ServerRoot, TrashItem }
 import { uid } from "./lib/types";
 import * as api from "./lib/api";
 import { AuthError } from "./lib/api";
-import { initTransfers, enqueue, subscribe, enqueueGroup } from "./lib/transfer";
+import { initTransfers, enqueue, subscribe, enqueueGroup, type GroupChildSpec } from "./lib/transfer";
 import { walkLocalDir, type WalkResult } from "./lib/local";
-import { serverMkdirs } from "./lib/server";
+import { isMissingEndpoint, serverCheck, serverMkdirs, type CheckState } from "./lib/server";
 import { applyTheme } from "./lib/theme";
 import { joinPath, parentOf } from "./lib/format";
 import { viewableType } from "./lib/preview";
@@ -31,7 +32,7 @@ import TransferPanel from "./components/TransferPanel";
 import ContextMenu, { type CtxItem } from "./components/ContextMenu";
 import UploadToDialog from "./components/UploadToDialog";
 import { IconEye, IconUpload, IconExpand } from "./components/icons";
-import { Confirm, Modal, Prompt } from "./components/Modals";
+import { Confirm, Modal, Prompt, UploadDiffDialog } from "./components/Modals";
 
 type Dialog =
   | { kind: "none" }
@@ -43,7 +44,15 @@ type Dialog =
   | { kind: "preview"; entry: FsEntry }
   | { kind: "share"; target: { path: string; isDir: boolean } }
   | { kind: "acl"; path: string }
-  | { kind: "versions"; entry: FsEntry };
+  | { kind: "versions"; entry: FsEntry }
+  // 0.3.2 目录重传预检：同名不同内容的文件逐个询问 覆盖/跳过（null=整体取消）
+  | {
+      kind: "uploadDiff";
+      serverName: string;
+      dirName: string;
+      rows: { rel: string; name: string; size: number }[];
+      onDecide(d: Record<string, "ovr" | "skip"> | null): void;
+    };
 
 interface PromptLoginProps {
   serverId: string;
@@ -643,8 +652,11 @@ export default function App() {
     notify(`已加入上传队列：${entry.name} → ${targets.length} 个服务端（见"传输"界面）`);
   }
 
-  /** 需求41：右键本地目录 → 整树上传。fs_walk 枚举 → mkdirs 批量建目录骨架（含空目录，
-   *  旧服务端自动退化逐个 mkdir）→ 逐文件入组队列（并发池限流，传输界面聚合一条）。 */
+  /** 需求41：右键本地目录 → 整树上传。0.3.2 完整时序：fs_walk 枚举 → **预检**
+   *  （/check 两遍：先 size、unknown 集补本地 SHA-256 复查；相同跳过、同名不同
+   *  内容弹窗逐个询问覆盖/跳过）→ mkdirs 批量建目录骨架（含空目录，旧服务端
+   *  自动退化逐个 mkdir）→ 入上传账本 → 逐文件入组队列（并发池限流）。
+   *  配 Server <0.2.1（无 /check）跳过预检走 0.2.0 旧流程（全量重传+冲突语义）。 */
   async function uploadDirToServers(entry: FsEntry, targets: { serverId: string; rootId: string }[]) {
     setDialog({ kind: "none" });
     let walk: WalkResult;
@@ -667,36 +679,181 @@ export default function App() {
     }
     const dirs = [entry.name, ...walk.entries.filter((x) => x.isDir).map((x) => `${entry.name}/${x.relPath}`)];
     const files = walk.entries.filter((x) => !x.isDir);
+    let enqueued = 0;
     for (const t of targets) {
+      const srvName = cfg?.servers.find((s) => s.id === t.serverId)?.name ?? t.serverId;
+      let plan: { children: GroupChildSpec[]; skipped: number } | null = null;
+      try {
+        plan = await planDirUpload(t, srvName, entry.name, dirAbs, files);
+      } catch (e) {
+        if (isMissingEndpoint(e)) {
+          plan = null; // 旧服务端无 /check：不预检，走 0.2.0 原流程
+        } else if (String(e).includes("DIFF_CANCELLED")) {
+          notify(`已取消：${entry.name} → ${srvName}`);
+          continue;
+        } else {
+          setError(`预检失败（${srvName}）：${String(e)}`);
+          continue; // 权限/jail/暂停等：整服务端跳过（上传也必失败），其余照常
+        }
+      }
+      if (!plan) {
+        plan = {
+          children: files.map((f) => ({
+            name: f.name,
+            remotePath: `${entry.name}/${f.relPath}`,
+            localPath: `${dirAbs}/${f.relPath}`,
+            size: f.size,
+            baseHash: "-",
+            journalRel: f.relPath,
+          })),
+          skipped: 0,
+        };
+      }
       try {
         await serverMkdirs(t.serverId, t.rootId, dirs);
       } catch (e) {
         setError(`建远端目录失败：${String(e)}`);
         continue; // 该服务端整体跳过（文件传上去也会因权限/jail 失败），其余照常
       }
-      if (files.length === 0) {
+      if (files.length === 0 && plan.children.length === 0) {
         notify(`已在所选服务端创建空目录 ${entry.name}`);
         continue;
       }
       const gid = uid();
+      // 账本先行（组+条目规格；done_files 由 Rust 在分片终态回写）。账本失败
+      // 不阻塞上传——只丢"重启续传"能力。
+      try {
+        await invoke("lg_new_group", {
+          gid,
+          label: `目录 ${entry.name}`,
+          serverId: t.serverId,
+          rootId: t.rootId,
+          localAbs: dirAbs,
+          remotePrefix: entry.name,
+          total: plan.children.length,
+        });
+        await invoke("lg_set_children", {
+          gid,
+          items: plan.children.map((c) => ({
+            relPath: c.journalRel ?? c.name,
+            name: c.name,
+            localPath: c.localPath,
+            remotePath: c.remotePath,
+            size: c.size,
+            mtimeMs: 0,
+          })),
+        });
+      } catch {
+        /* 账本不可用（磁盘满等）：降级为进程内任务，行为同 0.3.1 */
+      }
+      if (plan.children.length === 0) {
+        void invoke("lg_group_status", { gid, status: "done" }).catch(() => {});
+        notify(`目录上传：${entry.name} → ${srvName}，${plan.skipped} 个文件远端已相同，无需传输`);
+        void refreshRef.current();
+        continue;
+      }
       enqueueGroup({
         id: gid,
         label: `目录 ${entry.name}`,
         serverId: t.serverId,
         rootId: t.rootId,
-        children: files.map((f) => ({
-          name: f.name,
-          remotePath: `${entry.name}/${f.relPath}`, // 相对远程根；落在 <根>/<目录名>/…
-          localPath: `${dirAbs}/${f.relPath}`,
-          size: f.size,
-          baseHash: "-", // 与单文件流一致：断言新文件；已存在→冲突 error，组"重试"走覆盖
-        })),
+        children: plan.children,
+        skipped: plan.skipped,
       });
       watchGroup(gid, entry.name);
+      enqueued++;
     }
-    if (files.length > 0) {
-      notify(`已加入目录上传队列：${entry.name}（${files.length} 个文件）→ ${targets.length} 个服务端（见"传输"界面）`);
+    if (files.length > 0 && enqueued > 0) {
+      notify(`已加入目录上传队列：${entry.name}（${files.length} 个文件，重复部分将自动跳过/询问）→ ${enqueued} 个服务端（见"传输"界面）`);
     }
+  }
+
+  /** 目录重传预检（0.3.2）：两遍 /check + 差异弹窗；产出实际入队子任务与跳过数。 */
+  async function planDirUpload(
+    t: { serverId: string; rootId: string },
+    srvName: string,
+    dirName: string,
+    dirAbs: string,
+    files: { name: string; relPath: string; size: number }[]
+  ): Promise<{ children: GroupChildSpec[]; skipped: number }> {
+    const remoteOf = (rel: string) => `${dirName}/${rel}`;
+    const localOf = (rel: string) => `${dirAbs}/${rel}`;
+    // pass1：不带 hash（省首传的哈希计算——服务端 missing/differ 只看 size）
+    const r1 = await serverCheck(t.serverId, t.rootId, files.map((f) => ({ path: remoteOf(f.relPath), size: f.size })));
+    const st1 = new Map<string, CheckState>(r1.map((x) => [x.path, x.state]));
+    // pass2：size 相符但无哈希证据（unknown）的条目——算本地 SHA-256 复查
+    const unknowns = files.filter((f) => st1.get(remoteOf(f.relPath)) === "unknown");
+    const st2 = new Map<string, CheckState>();
+    if (unknowns.length > 0) {
+      const hashes = (await invoke<(string | null)[]>("fs_file_hashes", {
+        rootId: api.active().rootId,
+        rels: unknowns.map((f) => f.relPath),
+      })) as (string | null)[];
+      const withHash: { path: string; size: number; hash?: string }[] = [];
+      unknowns.forEach((f, i) => {
+        const h = hashes[i];
+        if (h) withHash.push({ path: remoteOf(f.relPath), size: f.size, hash: h });
+        else st2.set(remoteOf(f.relPath), "unknown"); // 本地读不到：保守按 unknown→覆盖上传
+      });
+      if (withHash.length > 0) {
+        const r2 = await serverCheck(t.serverId, t.rootId, withHash);
+        for (const x of r2) st2.set(x.path, x.state);
+      }
+    }
+    const children: GroupChildSpec[] = [];
+    const differ: { rel: string; name: string; size: number }[] = [];
+    let skipped = 0;
+    for (const f of files) {
+      const rp = remoteOf(f.relPath);
+      const state = st2.get(rp) ?? st1.get(rp) ?? "missing";
+      switch (state) {
+        case "same":
+          skipped++; // 相同自动跳过（用户决策）
+          break;
+        case "missing":
+          children.push({ name: f.name, remotePath: rp, localPath: localOf(f.relPath), size: f.size, baseHash: "-", journalRel: f.relPath });
+          break;
+        case "unknown":
+          // 大小相符但无法断定内容（存量文件无哈希记录等）→ 覆盖语义上传：
+          // baseHash "" 跳乐观校验，服务端覆盖前仍存版本（需求3 兜底）。
+          children.push({ name: f.name, remotePath: rp, localPath: localOf(f.relPath), size: f.size, baseHash: "", journalRel: f.relPath });
+          break;
+        default:
+          differ.push({ rel: f.relPath, name: f.name, size: f.size });
+      }
+    }
+    if (differ.length > 0) {
+      const decisions = await askUploadDiff(srvName, dirName, differ);
+      if (decisions === null) throw new Error("DIFF_CANCELLED");
+      for (const f of differ) {
+        if (decisions[f.rel] === "skip") {
+          skipped++;
+          continue;
+        }
+        children.push({ name: f.name, remotePath: remoteOf(f.rel), localPath: localOf(f.rel), size: f.size, baseHash: "", journalRel: f.rel });
+      }
+    }
+    return { children, skipped };
+  }
+
+  /** 同名不同内容询问对话框（Promise 化：null=整体取消本次目录上传）。 */
+  function askUploadDiff(
+    serverName: string,
+    dirName: string,
+    rows: { rel: string; name: string; size: number }[]
+  ): Promise<Record<string, "ovr" | "skip"> | null> {
+    return new Promise((resolve) => {
+      setDialog({
+        kind: "uploadDiff",
+        serverName,
+        dirName,
+        rows,
+        onDecide: (d) => {
+          setDialog({ kind: "none" });
+          resolve(d);
+        },
+      });
+    });
   }
 
   function rename(e: FsEntry) {
@@ -1069,6 +1226,15 @@ export default function App() {
           onSubmit={(targets) =>
             dialog.entry.isDir ? uploadDirToServers(dialog.entry, targets) : uploadToServers(dialog.entry, targets)
           }
+        />
+      )}
+
+      {dialog.kind === "uploadDiff" && (
+        <UploadDiffDialog
+          serverName={dialog.serverName}
+          dirName={dialog.dirName}
+          rows={dialog.rows}
+          onDecide={dialog.onDecide}
         />
       )}
 

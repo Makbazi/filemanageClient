@@ -44,14 +44,25 @@ export interface DataSource {
    *  防覆盖后陈旧。0.2.1：RAW 不入原始字节——缓存的是从文件提取的最大内嵌
    *  JPEG 预览（.jpg），浏览器按普通图片渲染 */
   mediaCache(entry: FsEntry): Promise<string>;
-  /** 网格视图缩略图（0.2.1 改版）：Rust 侧生成 ≤512px JPEG 入媒体缓存
-   *  （fs_thumb/srv_thumb），返回可被 convertFileSrc 使用的本机路径；
-   *  RAW 取其内嵌预览缩放。不支持/无内嵌预览/解码失败返回 null（前端回退图标）。
-   *  旧版是 ≤4MiB/2MiB data URL——大图与 RAW 全部回退图标，"只有点眼睛才看得到"。 */
+  /** 网格视图缩略图（0.3.2 改版）：服务端模式优先走服务端 GET /thumb（只回
+   *  ≤512px JPEG，浏览不再整文件入缓存），本地产物仍落媒体缓存
+   *  `<key_hash>.thumb.jpg`，返回其本机路径（前端 thumbcache.ts 经
+   *  media_read_bytes 建 blob 上屏，≤2GB 内存 LRU）。
+   *  null=永久无缩略图（回退图标，不重试）；**抛错=瞬时失败**（网络/服务端
+   *  繁忙等，由 FileView 队列退避重试 ≤3 轮后落图标）。0.2.1 旧契约的
+   *  catch→null 会吞掉瞬时错误造成"一次抖动永久图标"，0.3.2 起语义分离。 */
   thumbPath(entry: FsEntry): Promise<string | null>;
 
-  /** 上传/导入本机文件到 dir（带进度事件，transferId 关联 TransferPanel） */
-  uploadFile(localPath: string, dir: string, transferId: string, baseHash?: string): Promise<void>;
+  /** 上传/导入本机文件到 dir（带进度事件，transferId 关联 TransferPanel）。
+   *  journal（0.3.2）：目录上传账本坐标 {gid, rel}——Rust 据此回写会话/终态，
+   *  支撑重启后"继续未完成的上传组"；本地实现忽略。 */
+  uploadFile(
+    localPath: string,
+    dir: string,
+    transferId: string,
+    baseHash?: string,
+    journal?: { gid: string; rel: string } | null
+  ): Promise<void>;
   /** 下载/导出到本机完整路径（带进度事件） */
   downloadFile(destPath: string, entryPath: string, transferId: string): Promise<void>;
 

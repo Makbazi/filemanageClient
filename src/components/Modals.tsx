@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { IconAlert, IconX } from "./icons";
+import { fmtSize } from "../lib/format";
 
 export function Modal(props: {
   title: string;
@@ -128,6 +129,77 @@ export function Prompt(props: {
         </button>
         <button className="btn primary" disabled={!value.trim()} onClick={ok}>
           确定
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/** 0.3.2 目录重传差异询问：远端同名但内容不同（哈希不等）的文件清单，
+ *  逐个选"覆盖/跳过"+批量按钮；取消=整次目录上传中止（onDecide(null)）。
+ *  默认选择：覆盖（本地通常就是要更新的一方）。 */
+export function UploadDiffDialog(p: {
+  serverName: string;
+  dirName: string;
+  rows: { rel: string; name: string; size: number }[];
+  onDecide(d: Record<string, "ovr" | "skip"> | null): void;
+}) {
+  const [choice, setChoice] = useState<Record<string, "ovr" | "skip">>(() => {
+    const m: Record<string, "ovr" | "skip"> = {};
+    for (const r of p.rows) m[r.rel] = "ovr";
+    return m;
+  });
+  const setAll = (v: "ovr" | "skip") => {
+    const m: Record<string, "ovr" | "skip"> = {};
+    for (const r of p.rows) m[r.rel] = v;
+    setChoice(m);
+  };
+  return (
+    <Modal title="目录上传：发现同名但内容不同的文件" onClose={() => p.onDecide(null)} width={560}>
+      <div className="field">
+        <p className="dim">
+          上传「{p.dirName}」到 {p.serverName}：以下 {p.rows.length} 个文件在服务端已存在且内容不同
+          （大小相同但内容哈希不一致）。选择覆盖（服务端会先保存旧版本）或跳过（保留远端）。
+        </p>
+      </div>
+      <div className="diff-list">
+        {p.rows.map((r) => (
+          <div key={r.rel} className="diff-row" title={r.rel}>
+            <span className="diff-name">{r.name}</span>
+            <span className="diff-size dim">{fmtSize(r.size)}</span>
+            <label className="diff-opt">
+              <input
+                type="radio"
+                name={`diff-${r.rel}`}
+                checked={choice[r.rel] === "ovr"}
+                onChange={() => setChoice((prev) => ({ ...prev, [r.rel]: "ovr" }))}
+              />
+              覆盖
+            </label>
+            <label className="diff-opt">
+              <input
+                type="radio"
+                name={`diff-${r.rel}`}
+                checked={choice[r.rel] === "skip"}
+                onChange={() => setChoice((prev) => ({ ...prev, [r.rel]: "skip" }))}
+              />
+              跳过
+            </label>
+          </div>
+        ))}
+      </div>
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={() => p.onDecide(null)}>
+          取消
+        </button>
+        <button className="btn" onClick={() => setAll("skip")}>
+          全部跳过
+        </button>
+        <button className="btn" onClick={() => setAll("ovr")}>
+          全部覆盖
+        </button>
+        <button className="btn primary" onClick={() => p.onDecide(choice)}>
+          开始上传
         </button>
       </div>
     </Modal>
