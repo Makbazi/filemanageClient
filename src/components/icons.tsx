@@ -254,6 +254,15 @@ export const IconLock = (p: P) => (
     <path d="M7 11V7a5 5 0 0 1 10 0v4" />
   </Svg>
 );
+// 传输（上下双向箭头，0.3.3 需求4：传输面板悬浮开关按钮图标）
+export const IconTransfer = (p: P) => (
+  <Svg {...p}>
+    <path d="M8 4v13" />
+    <path d="M5 14l3 3 3-3" />
+    <path d="M16 20V7" />
+    <path d="M13 10l3-3 3 3" />
+  </Svg>
+);
 export const IconSwap = (p: P) => (
   <Svg {...p}>
     <path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />

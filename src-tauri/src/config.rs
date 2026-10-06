@@ -153,14 +153,21 @@ pub struct UiConf {
     /// 自动退回退出）| quit=退出程序
     #[serde(default = "default_close_action")]
     pub close_action: String,
-    /// 视频播放方式（0.3.0 需求1）：system=WebView 内 <video> 走系统解码器
-    /// （默认；解码失败时查看器提示并可一键改用外部播放器）| external=外部播放器
+    /// 视频播放方式（0.3.0 需求1；0.3.3 增 ffmpeg 档）：system=WebView 内 <video>
+    /// 走系统解码器（默认；解码失败时查看器提示，可一键外部播放器或 ffmpeg 转码）
+    /// | ffmpeg=经用户配置的 ffmpeg 转码 H.264 MP4 后窗口内播放（产物入媒体缓存复用）
+    /// | external=外部播放器
     #[serde(default = "default_video_decoder")]
     pub video_decoder: String,
     /// 外部播放器命令（0.3.0；空=系统关联播放器）。argv 直起不经 shell，
     /// 含 `{file}` 则替换为文件路径，否则路径追加为末位参数；路径含空格请为命令加引号
     #[serde(default)]
     pub video_player_cmd: Option<String>,
+    /// ffmpeg 可执行文件路径（0.3.3 需求3；空=PATH 探测 "ffmpeg"）。
+    /// "ffmpeg 转码"播放档与系统解码失败面板的"用 ffmpeg 转码播放"兜底都走本配置；
+    /// 不内嵌 ffmpeg，由用户自备（Windows 也可指向 ffmpeg.exe 全路径）
+    #[serde(default)]
+    pub ffmpeg_path: Option<String>,
 }
 
 fn default_theme() -> String {
@@ -196,6 +203,7 @@ impl Default for UiConf {
             close_action: default_close_action(),
             video_decoder: default_video_decoder(),
             video_player_cmd: None,
+            ffmpeg_path: None,
         }
     }
 }

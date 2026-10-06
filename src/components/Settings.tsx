@@ -17,6 +17,7 @@ import {
   active,
   credForget,
   fetchRoots,
+  ffmpegProbe,
   serverCall,
   serverChangePassword,
   serverLogout,
@@ -67,6 +68,10 @@ export default function Settings(p: Props) {
   const [playerDraft, setPlayerDraft] = useState(p.cfg.ui.videoPlayerCmd ?? "");
   const [testMsg, setTestMsg] = useState("");
   const [testErr, setTestErr] = useState("");
+  // 0.3.3 需求3：ffmpeg 路径草稿（同 Enter/失焦提交）与探测按钮状态
+  const [ffmpegDraft, setFfmpegDraft] = useState(p.cfg.ui.ffmpegPath ?? "");
+  const [ffmMsg, setFfmMsg] = useState("");
+  const [ffmErr, setFfmErr] = useState("");
 
   // 版本信息：走 Tauri app 命令（core:app:default 已含 allow-version/allow-name/
   // allow-tauri-version，无需扩权限），故 -V 覆盖产物版本时这里同步变化；
@@ -205,6 +210,23 @@ export default function Settings(p: Props) {
       setTestMsg(`已启动外部播放器，探测文件：${opened}`);
     } catch (ex) {
       setTestErr(String(ex));
+    }
+  }
+
+  // 0.3.3 需求3：ffmpeg 路径提交（Enter/失焦）与可用性探测
+  const commitFfmpeg = () => {
+    const v = ffmpegDraft.trim();
+    if (v !== (cfg.ui.ffmpegPath ?? "")) uiSet({ ffmpegPath: v });
+  };
+
+  async function runFfmpegProbe() {
+    setFfmMsg("");
+    setFfmErr("");
+    try {
+      const ver = await ffmpegProbe();
+      setFfmMsg(`ffmpeg 可用：${ver}`);
+    } catch (ex) {
+      setFfmErr(String(ex));
     }
   }
 
@@ -381,7 +403,8 @@ export default function Settings(p: Props) {
             启动时恢复各服务端登录状态（0.6.0 需求9：上次保持登录的重开后仍是登录态；
             关闭则每次启动全部退出——已记住的密码保留，退出状态的服务端可一键快速重登）
           </label>
-          {/* 0.3.0 需求1：H.264/H.265 播放方式——系统解码器（WebView 原生）或可配置外部播放器 */}
+          {/* 0.3.0 需求1 / 0.3.3 需求3：H.264/H.265 播放三档——系统解码器（默认）/
+              ffmpeg 转码（用户配置 ffmpeg，不内嵌）/ 外部播放器 */}
           <div className="field">
             <label>视频播放（H.264 / H.265）</label>
             <div className="radio-row">
@@ -396,6 +419,14 @@ export default function Settings(p: Props) {
               <label className="radio-item">
                 <input
                   type="radio"
+                  checked={cfg.ui.videoDecoder === "ffmpeg"}
+                  onChange={() => uiSet({ videoDecoder: "ffmpeg" })}
+                />
+                ffmpeg 转码（窗口内播放）
+              </label>
+              <label className="radio-item">
+                <input
+                  type="radio"
                   checked={cfg.ui.videoDecoder === "external"}
                   onChange={() => uiSet({ videoDecoder: "external" })}
                 />
@@ -405,7 +436,9 @@ export default function Settings(p: Props) {
             <p className="dim tip">
               系统解码器 = 操作系统自带的视频组件（Windows：WebView2/Media Foundation；Linux：GStreamer）。
               H.265/HEVC 需系统装有对应解码组件（Windows「HEVC 视频扩展」，Linux gstreamer HEVC 插件）；
-              窗口内播放失败时查看器会给出提示，并可一键改用外部播放器。
+              窗口内播放失败时查看器会给出提示，可一键「用 ffmpeg 转码播放」或改用外部播放器。
+              ffmpeg 转码档 = 无法直接解码的视频先由 ffmpeg 转成 H.264 MP4 再在窗口内播放
+              （首次转码有等待、之后直接复用产物；转码产物入媒体缓存、受缓存上限自动淘汰）。
             </p>
             {cfg.ui.videoDecoder === "external" && (
               <>
@@ -433,6 +466,34 @@ export default function Settings(p: Props) {
                 </p>
               </>
             )}
+            {/* 0.3.3 需求3：ffmpeg 可执行路径（不内嵌 ffmpeg）；选"ffmpeg 转码"档时
+                用于播放，选"系统解码器"档时作为解码失败面板的转码兜底——两档共用本路径 */}
+            <div className="field">
+              <label>ffmpeg 路径（留空 = 自动在 PATH 中查找 ffmpeg）</label>
+              <input
+                placeholder={'留空走 PATH ／ /usr/bin/ffmpeg ／ "C:\\ffmpeg\\bin\\ffmpeg.exe"'}
+                value={ffmpegDraft}
+                onChange={(e) => setFfmpegDraft(e.target.value)}
+                onBlur={commitFfmpeg}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitFfmpeg();
+                }}
+              />
+              <div className="toolbar-inline">
+                <button className="btn small" onClick={() => void runFfmpegProbe()}>
+                  探测 ffmpeg
+                </button>
+              </div>
+              {ffmMsg && <p className="dim tip">{ffmMsg}</p>}
+              {ffmErr && <div className="error-bar">{ffmErr}</div>}
+              <p className="dim tip">
+                「ffmpeg 转码」档：窗口播不了的视频（如缺系统 HEVC 组件的 H.265）先用本机 ffmpeg 转成
+                H.264 MP4 再播放——转码产物落媒体缓存（同预览缓存受磁盘上限与 LRU 管理），
+                同一文件只转一次、之后直接复用；首次转码耗时随视频长度增大。「系统解码器」档下
+                若窗口解码失败，查看/预览的失败面板也提供「用 ffmpeg 转码播放」一键兜底。
+                本程序不内置 ffmpeg，需自备并在上方配置路径。
+              </p>
+            </div>
           </div>
         </div>
       )}
@@ -861,7 +922,7 @@ function AboutTab(p: { info: AppInfo }) {
       </div>
       <div className="list-row">
         <span className="dim">配套服务端</span>
-        <span className="about-val">0.2.x（推荐，当前 0.2.0）· 0.1.x / 0.7.x / 0.6.x / 0.5.x 可用</span>
+        <span className="about-val">0.2.x（推荐，当前 0.2.2）· 0.1.x / 0.7.x / 0.6.x / 0.5.x 可用</span>
       </div>
       <p className="dim tip">
         版本号读自安装包自身元数据：构建脚本以 -V 指定产物版本时，这里显示的就是该注入值（不改动工程版本源文件）。

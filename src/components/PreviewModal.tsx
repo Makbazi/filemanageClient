@@ -24,6 +24,9 @@ export default function PreviewModal(p: Props) {
   // 0.3.0 需求1：视频解码失败 → 外部播放器兜底入口（弹窗内不自动外起，防惊吓）
   const [mediaPath, setMediaPath] = useState("");
   const [vErr, setVErr] = useState(false);
+  // 0.3.3 需求3：ffmpeg 转码兜底状态（弹窗不自动转码——只在失败面板给入口，防惊吓）
+  const [ffmBusy, setFfmBusy] = useState(false);
+  const [ffmErr, setFfmErr] = useState("");
   const e = p.entry;
   // 0.2.1：显示分流统一走 viewableType（与查看器同一支持集，含相机 RAW——
   // kind 为 other 但 Rust 可提取内嵌 JPEG 预览入媒体缓存，图像/媒体按图片通道）
@@ -66,6 +69,21 @@ export default function PreviewModal(p: Props) {
     if (!mediaPath) return;
     api.openMedia(mediaPath).catch((ex) => setErr(String(ex)));
   };
+  // 0.3.3 需求3：预览失败面板的 ffmpeg 转码入口（force——容器友好但系统解不了也重转）
+  const transcodeWithFfmpeg = async () => {
+    if (!mediaPath || ffmBusy) return;
+    setFfmErr("");
+    setFfmBusy(true);
+    try {
+      const playable = await api.ffmpegPlayable(mediaPath, true);
+      setMediaUrl(convertFileSrc(playable));
+      setVErr(false);
+    } catch (ex) {
+      setFfmErr(String(ex));
+    } finally {
+      setFfmBusy(false);
+    }
+  };
 
   return (
     <Modal title={`预览 · ${e.name}（${fmtSize(e.size)}）`} onClose={p.onClose} width={860}>
@@ -78,17 +96,24 @@ export default function PreviewModal(p: Props) {
         {err && <div className="error-bar">{err}</div>}
         {!busy && !err && mediaUrl && vt === "image" && <img src={mediaUrl} alt={e.name} />}
         {!busy && !err && dataUrl && <pre className="preview-text">{b64ToText(dataUrl)}</pre>}
-        {/* 0.3.0 需求1：预览视频同样捕获系统解码失败（onError）→ 外部播放器兜底入口；
-            弹窗内不自动外起（防惊吓），需要双击进查看器或点下方按钮 */}
+        {/* 0.3.0 需求1 + 0.3.3 需求3：预览视频捕获系统解码失败（onError）→
+            ffmpeg 转码 / 外部播放器兜底入口；弹窗内不自动外起/自动转码（防惊吓），
+            需要双击进查看器或点下方按钮 */}
         {!busy && !err && mediaUrl && vt === "video" && !vErr && (
           <video className="preview-video" src={mediaUrl} controls autoPlay onError={() => setVErr(true)} />
         )}
         {!busy && !err && vt === "video" && vErr && (
           <div className="empty">
             无法在预览内解码该视频——可能缺少系统 HEVC/H.265 解码组件，或容器/编码不受支持
-            <button className="btn primary" disabled={!mediaPath} onClick={openExternal}>
-              用外部播放器打开
-            </button>
+            <div className="row-actions">
+              <button className="btn primary" disabled={!mediaPath || ffmBusy} onClick={() => void transcodeWithFfmpeg()}>
+                {ffmBusy ? "ffmpeg 转码中…" : "用 ffmpeg 转码播放"}
+              </button>
+              <button className="btn" disabled={!mediaPath} onClick={openExternal}>
+                用外部播放器打开
+              </button>
+            </div>
+            {ffmErr && <div className="error-bar">{ffmErr}</div>}
           </div>
         )}
         {!busy && !err && mediaUrl && vt === "audio" && (

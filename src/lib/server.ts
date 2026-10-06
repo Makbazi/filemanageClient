@@ -184,16 +184,16 @@ export class ServerSource implements DataSource {
   }
 
   thumbPath(entry: FsEntry): Promise<string | null> {
-    // 0.3.2：Rust 优先走服务端 GET /thumb（浏览零下载——不再整文件入媒体缓存），
-    // 旧服务端/服务端不可解码时自动回退旧管线（≤8MiB 整文件入缓存交浏览器自绘）。
-    // size_hint=entry.size 供 Rust 判定回退闸门。null=永久无缩略图；抛错=瞬时
-    // 失败（FileView 队列退避重试）。
+    // 0.3.3：Rust 走服务端 GET /thumb（Server ≥0.2.2 含 BMP——出图能力与本地缩放
+    // 对齐；浏览零下载）。413/415/403=永久无图（null，直接落图标——不再整文件
+    // 下载、不再空转重试）；网络/429/401/5xx=瞬时（抛错，FileView 队列退避重试）。
+    // 配 Server ≤0.2.0（端点 404）回退旧管线：整文件**静默**入媒体缓存后本地缩放
+    // （0.3.3 起查看通道不发 fm-transfer 事件，绝不出传输行）。size_hint 参数移除。
     return invoke("srv_thumb", {
       serverId: this.serverId,
       rootId: this.rootId,
       path: entry.path,
       ver: String(entry.mtime),
-      sizeHint: entry.size,
     }) as Promise<string | null>;
   }
 

@@ -952,6 +952,53 @@ tr.row.selected {
   color: var(--text-dim);
   letter-spacing: 0.5px;
 }
+/* 0.3.3 需求4：面板头部行（标题 + 隐藏按钮） */
+.transfer-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+/* 0.3.3 需求4：收起态——右下角悬浮开关（与面板同层：查看 90 < 本钮/面板 150 < 弹窗 100? 不——
+   模态 100 在面板之下是 0.3.2 既有层叠，本钮与面板同层 150，模态之上仍盖住它属有意：
+   登录框等模态期间不应可点传输开关。toast 200 恒在上） */
+.transfer-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--toast-bg);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--shadow);
+  color: var(--accent);
+  cursor: pointer;
+  z-index: 150;
+  animation: pop 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+.transfer-fab:hover {
+  border-color: var(--accent);
+}
+.transfer-fab-badge {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--grad);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
 .transfer-item {
   display: flex;
   flex-direction: column;

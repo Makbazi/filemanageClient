@@ -14,9 +14,11 @@ import { kindIcon, IconX, IconExpand, IconCollapse, IconDownload } from "./icons
 
 interface Props {
   entry: FsEntry;
-  /** 视频播放方式（0.3.0 需求1；App 传 cfg.ui.videoDecoder）：system=窗口内 <video>
-   *  走系统解码器（失败给外部播放器兜底入口）；external=直接交外部播放器。 */
-  decoder?: "system" | "external";
+  /** 视频播放方式（0.3.0 需求1；0.3.3 增 ffmpeg 档；App 传 cfg.ui.videoDecoder）：
+   *  system=窗口内 <video> 走系统解码器（失败给外部播放器/ffmpeg 转码兜底入口）；
+   *  ffmpeg=媒体缓存就绪后经用户配置的 ffmpeg 转码 H.264 MP4 再窗口内播（产物复用）；
+   *  external=直接交外部播放器。 */
+  decoder?: "system" | "ffmpeg" | "external";
   onExit(): void;
   onDownload(e: FsEntry): void;
 }
@@ -31,6 +33,9 @@ export default function FileViewer(p: Props) {
   const [vErr, setVErr] = useState(false); // 系统解码失败（onError）
   const [vKey, setVKey] = useState(0); // 重试时重挂 <video>
   const [inlinePlay, setInlinePlay] = useState(false); // external 模式下手动回窗口内播
+  // 0.3.3 需求3：ffmpeg 转码状态（ffmBusy=首次转码中；ffmErr=ffmpeg 不可用/转码失败）
+  const [ffmBusy, setFfmBusy] = useState(false);
+  const [ffmErr, setFfmErr] = useState("");
   const autoOpened = useRef(""); // external 模式自动打开去重（含 StrictMode 双执行）
   // 仅记录"本查看器置过的"全屏：退出时只撤销自己开启的，绝不抢 WM 自设状态
   const fsApplied = useRef(false);
@@ -47,6 +52,8 @@ export default function FileViewer(p: Props) {
       setMediaPath("");
       setVErr(false);
       setInlinePlay(false);
+      setFfmErr("");
+      setFfmBusy(false);
       try {
         if (type === "text") {
           const d = await src.previewData(e);
@@ -55,6 +62,21 @@ export default function FileViewer(p: Props) {
           const path = await src.mediaCache(e);
           if (!cancelled) {
             setMediaPath(path);
+            // 0.3.3 需求3：ffmpeg 档——先取媒体缓存（0.3.3 起静默、无传输行），
+            // 再按需转码（容器 WebView 可直放时 Rust 侧原路返回，不起子进程）
+            if (type === "video" && p.decoder === "ffmpeg") {
+              setBusy(false);
+              setFfmBusy(true);
+              try {
+                const playable = await api.ffmpegPlayable(path, false);
+                if (!cancelled) setUrl(convertFileSrc(playable));
+              } catch (ex) {
+                if (!cancelled) setFfmErr(String(ex));
+              } finally {
+                if (!cancelled) setFfmBusy(false);
+              }
+              return;
+            }
             setUrl(convertFileSrc(path));
           }
         }
@@ -68,7 +90,25 @@ export default function FileViewer(p: Props) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [e.path, String(e.mtime), type]);
+  }, [e.path, String(e.mtime), type, p.decoder]);
+
+  // 0.3.3 需求3：用 ffmpeg 转码后在本窗口播放（系统解码失败的一键兜底；
+  // ffmpeg 模式下重试也走它）。force=true 连"容器友好但编码不受支持"也重转。
+  const transcodeWithFfmpeg = async (force: boolean) => {
+    if (!mediaPath || ffmBusy) return;
+    setFfmErr("");
+    setFfmBusy(true);
+    try {
+      const playable = await api.ffmpegPlayable(mediaPath, force);
+      setUrl(convertFileSrc(playable));
+      setVErr(false);
+      setVKey((k) => k + 1); // 重挂 <video> 装载转码产物
+    } catch (ex) {
+      setFfmErr(String(ex));
+    } finally {
+      setFfmBusy(false);
+    }
+  };
 
   // external 模式：缓存路径就绪后自动打开一次（同一文件不重复起播放器）
   useEffect(() => {
@@ -156,8 +196,9 @@ export default function FileViewer(p: Props) {
             onError={() => setErr("图片解码失败（格式可能不受支持），可下载后用本机看图工具打开")}
           />
         )}
-        {/* 0.3.0 需求1：视频三段式——外部播放面板（已按设置外起，可重开/回窗口内）、
-            系统解码失败面板（外部播放器兜底 + 重试）、正常 <video>（onError 捕获解码失败） */}
+        {/* 0.3.0 需求1 + 0.3.3 需求3：视频分段——外部播放面板（已按设置外起，可重开/
+            回窗口内）、ffmpeg 转码中、ffmpeg 不可用/失败面板（外部播放器兜底+重试）、
+            系统解码失败面板（ffmpeg 转码 + 外部播放器兜底 + 重试）、正常 <video>（onError 捕获解码失败） */}
         {!busy && !err && type === "video" && externalMode && (
           <div className="empty">
             已按设置在外部播放器中播放；若未看到播放器窗口，请检查「设置 → 外观 → 视频播放」的外部播放器命令
@@ -171,12 +212,35 @@ export default function FileViewer(p: Props) {
             </div>
           </div>
         )}
-        {!busy && !err && type === "video" && !externalMode && vErr && (
+        {!busy && !err && type === "video" && !externalMode && ffmBusy && (
+          <div className="empty">
+            <div className="spinner" /> 正在用 ffmpeg 转码（该文件首次播放需要转码，之后直接复用产物；
+            大文件请耐心等待）…
+          </div>
+        )}
+        {!busy && !err && type === "video" && !externalMode && !ffmBusy && ffmErr && (
+          <div className="empty">
+            ffmpeg 转码播放不可用：{ffmErr}
+            <div className="dim tip">请在「设置 → 外观 → 视频播放 → ffmpeg」填写 ffmpeg 可执行文件路径（或安装后留空走 PATH）</div>
+            <div className="row-actions">
+              <button className="btn primary" disabled={!mediaPath} onClick={openExternal}>
+                用外部播放器打开
+              </button>
+              <button className="btn" onClick={() => void transcodeWithFfmpeg(true)}>
+                重试转码
+              </button>
+            </div>
+          </div>
+        )}
+        {!busy && !err && type === "video" && !externalMode && !ffmBusy && !ffmErr && vErr && (
           <div className="empty">
             无法在窗口内解码该视频——可能缺少系统解码组件（Windows：安装「HEVC 视频扩展」；Linux：安装
             gstreamer HEVC 插件），或容器/编码不受支持
             <div className="row-actions">
-              <button className="btn primary" disabled={!mediaPath} onClick={openExternal}>
+              <button className="btn primary" disabled={!mediaPath} onClick={() => void transcodeWithFfmpeg(true)}>
+                用 ffmpeg 转码播放
+              </button>
+              <button className="btn" disabled={!mediaPath} onClick={openExternal}>
                 用外部播放器打开
               </button>
               <button
@@ -191,7 +255,7 @@ export default function FileViewer(p: Props) {
             </div>
           </div>
         )}
-        {!busy && !err && type === "video" && !externalMode && !vErr && (
+        {!busy && !err && type === "video" && !externalMode && !ffmBusy && !ffmErr && !vErr && (
           <video key={vKey} className="viewer-video" src={url} controls autoPlay onError={() => setVErr(true)} />
         )}
         {!busy && !err && type === "audio" && (
