@@ -516,12 +516,16 @@ pub async fn srv_download(
         &name,
         limit,
         &flag,
+        false, // 手动下载：完整传输事件（进度/暂停/完成）
     )
     .await;
     unregister_cancel(&transfer_id);
     result
 }
 
+/// `silent=true`（0.3.3 需求1）：不发任何 fm-transfer 事件——查看/预览/缩略图的
+/// 媒体缓存取字节是**本地缓存行为**，绝不以"传输"形态出现在右下角面板/传输页；
+/// 手动上传/下载（srv_download/srv_upload）恒 silent=false。
 #[allow(clippy::too_many_arguments)]
 async fn download_inner(
     app: &AppHandle,
@@ -533,6 +537,7 @@ async fn download_inner(
     name: &str,
     limit_kbps: u32,
     flag: &AtomicU8,
+    silent: bool,
 ) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
@@ -587,12 +592,14 @@ async fn download_inner(
         if sig != SIG_NONE {
             let _ = file.flush().await;
             let paused = sig == SIG_PAUSE;
-            emit(app, TransferEvent {
-                transfer_id: transfer_id.into(), name: name.into(), direction: "download".into(),
-                sent, total, speed: 0,
-                status: if paused { "paused" } else { "cancelled" }.into(),
-                message: if paused { "已暂停（保留 .part，可继续）".into() } else { "已取消（保留 .part 可续传）".into() },
-            });
+            if !silent {
+                emit(app, TransferEvent {
+                    transfer_id: transfer_id.into(), name: name.into(), direction: "download".into(),
+                    sent, total, speed: 0,
+                    status: if paused { "paused" } else { "cancelled" }.into(),
+                    message: if paused { "已暂停（保留 .part，可继续）".into() } else { "已取消（保留 .part 可续传）".into() },
+                });
+            }
             return Err(if paused { "已暂停" } else { "已取消" }.into());
         }
         let t0 = Instant::now();
@@ -604,10 +611,12 @@ async fn download_inner(
         if last_emit.elapsed() >= Duration::from_millis(200) {
             last_emit = Instant::now();
             let speed = (sent.saturating_sub(existing)) as f64 / started.elapsed().as_secs_f64().max(0.001);
-            emit(app, TransferEvent {
-                transfer_id: transfer_id.into(), name: name.into(), direction: "download".into(),
-                sent, total, speed: speed as u64, status: "running".into(), message: String::new(),
-            });
+            if !silent {
+                emit(app, TransferEvent {
+                    transfer_id: transfer_id.into(), name: name.into(), direction: "download".into(),
+                    sent, total, speed: speed as u64, status: "running".into(), message: String::new(),
+                });
+            }
         }
     }
     file.flush().await.map_err(|e| e.to_string())?;
@@ -615,10 +624,12 @@ async fn download_inner(
     tokio::fs::rename(&part, dest_path)
         .await
         .map_err(|e| e.to_string())?;
-    emit(app, TransferEvent {
-        transfer_id: transfer_id.into(), name: name.into(), direction: "download".into(),
-        sent, total: sent, speed: 0, status: "done".into(), message: dest_path.into(),
-    });
+    if !silent {
+        emit(app, TransferEvent {
+            transfer_id: transfer_id.into(), name: name.into(), direction: "download".into(),
+            sent, total: sent, speed: 0, status: "done".into(), message: dest_path.into(),
+        });
+    }
     Ok(())
 }
 
@@ -1100,7 +1111,8 @@ async fn put_chunk_try(
 
 // ---------- 预览 / 媒体缓存（需求11） ----------
 
-fn simple_hash(s: &str) -> u64 {
+/// 媒体缓存键哈希（0.3.3 起 player.rs ffmpeg 转码产物命名亦复用）。
+pub(crate) fn simple_hash(s: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
@@ -1160,6 +1172,7 @@ pub(crate) async fn srv_media_ensure(
             &name,
             limit,
             &flag,
+            true, // 0.3.3 需求1：查看/预览取字节=本地缓存行为，绝不产生传输行
         )
         .await?;
         note_media_write(&st, &dest);
@@ -1178,6 +1191,7 @@ pub(crate) async fn srv_media_ensure(
             &name,
             limit,
             &flag,
+            true,
         )
         .await?;
     }
@@ -1190,8 +1204,9 @@ pub(crate) async fn srv_media_ensure(
     Ok(dest)
 }
 
-/// 媒体缓存新落盘条目：登记字节数并触发超限淘汰（0.3.2 磁盘 ≤10GB LRU）。
-fn note_media_write(st: &AppState, dest: &std::path::Path) {
+/// 媒体缓存新落盘条目：登记字节数并触发超限淘汰（0.3.2 磁盘 ≤10GB LRU；
+/// 0.3.3 起 player.rs 的 ffmpeg 转码产物同走本登记）。
+pub(crate) fn note_media_write(st: &AppState, dest: &std::path::Path) {
     if let Ok(m) = std::fs::metadata(dest) {
         crate::cachemgr::note_new_file(m.len());
     }
@@ -1258,17 +1273,23 @@ pub async fn srv_preview_data(
     ))
 }
 
-/// 服务端文件缩略图（网格视图，需求14；0.3.2 改版——"浏览零下载"核心）。
-/// 优先走服务端 `GET /api/v1/thumb`（Server 0.2.1 加性端点）：只回 ≤512px
-/// JPEG，**网格浏览不再把整文件拉进本地媒体缓存**；产物仍落媒体缓存
-/// `<key_hash>.thumb.jpg`（与旧管线同名同键，前端 blob 通道不变）。
-/// 回退链（兼容与安全垫）：
-///  - 404（Server ≤0.2.0）→ 整条旧管线：srv_media_ensure 整文件入缓存后本地
-///    缩放（旧语义，现已受 10GB LRU 约束；CHANGELOG 声明为已接受代价）；
-///  - 413/415/429（服务端过大/不可解码/繁忙）且 size_hint ≤8MiB → 旧管线
-///    （webp/heic/svg 等回浏览器自绘——查看可临时落盘、纳入上限淘汰的已确认边界）；
-///  - 同上但 >8MiB → Err（前端图标回退 + 队列退避重试）。
-/// 返回缓存绝对路径（前端经 media_read_bytes 建 blob，≤2GB 内存 LRU）。
+/// 服务端文件缩略图（网格视图，需求14；0.3.2"浏览零下载"核心；0.3.3 契约收紧）。
+/// 优先走服务端 `GET /api/v1/thumb`：只回 ≤512px JPEG，**网格浏览不把整文件
+/// 拉进本地媒体缓存**；产物仍落媒体缓存 `<key_hash>.thumb.jpg`（与旧管线同名
+/// 同键，前端 blob 通道不变）。Server 0.2.2 起白名单含 BMP（出图能力与本地
+/// 缩放机制对齐）；服务端不可解码的（webp/heic 等）小文件仍可由旧管线静默入
+/// 缓存后本地缩放（与本地目录"≤8MiB 浏览器自绘"同形——查看允许临时落盘的
+/// 既定边界，且 0.3.3 起该通道**绝不出现传输行**）。
+/// 0.3.3 返回值契约（与 DataSource.thumbPath 对齐；size_hint 参数移除）：
+///  - `Ok(Some(path))` = 缩略图就绪（媒体缓存绝对路径，前端经 media_read_bytes
+///    建 blob，≤2GB 内存 LRU）；
+///  - `Ok(None)` = **永久无图**（413/415/403 语义拒绝、或旧管线也出不来图）——
+///    前端直接落图标：不再整文件下载、不再无谓重试（0.3.2 的 ">8MiB 报错重试
+///    3 轮" 浪费往返且最终同结果）；
+///  - `Err` = **瞬时失败**（网络/429 繁忙重试耗尽/401 续期失败/5xx）——
+///    前端队列退避重试 ≤3 轮。
+/// 404（Server ≤0.2.0 无端点）→ 旧管线：srv_media_ensure 整文件静默入缓存 +
+/// thumb::ensure_thumb 本地缩放（配旧服务端的功能兼容面见 CHANGELOG）。
 #[tauri::command]
 pub async fn srv_thumb(
     app: AppHandle,
@@ -1276,59 +1297,60 @@ pub async fn srv_thumb(
     root_id: String,
     path: String,
     ver: Option<String>,
-    size_hint: Option<u64>,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let st = state(&app);
     let key = srv_media_key(&server_id, &root_id, &path, ver.as_deref());
     let key_hash = simple_hash(&key);
-    let thumb = st.media_cache_dir().join(format!("{key_hash:x}.thumb.jpg"));
+    let thumb = st.media_cache_dir().join(format!("{:x}.thumb.jpg", key_hash));
     if thumb.exists() {
         crate::cachemgr::touch(&thumb);
-        return Ok(thumb.to_string_lossy().into_owned());
+        return Ok(Some(thumb.to_string_lossy().into_owned()));
     }
-    let small = size_hint.unwrap_or(0) <= 8 << 20;
     match fetch_server_thumb(&app, &server_id, &root_id, &path).await {
         ServerThumb::Bytes(b) => {
             let _ = std::fs::create_dir_all(st.media_cache_dir());
-            let tmp = st.media_cache_dir().join(format!("{key_hash:x}.thumb.jpg.tmp"));
+            let tmp = st.media_cache_dir().join(format!("{:x}.thumb.jpg.tmp", key_hash));
             std::fs::write(&tmp, &b).map_err(|e| e.to_string())?;
             std::fs::rename(&tmp, &thumb).map_err(|e| e.to_string())?;
             crate::cachemgr::note_new_file(b.len() as u64);
             crate::cachemgr::maybe_enforce(&st);
-            return Ok(thumb.to_string_lossy().into_owned());
+            return Ok(Some(thumb.to_string_lossy().into_owned()));
         }
+        ServerThumb::Permanent => return Ok(None),
+        ServerThumb::Busy(msg) => return Err(msg),
         ServerThumb::Legacy => {}
-        ServerThumb::Unsupported(_) if small => {} // 小文件：旧管线让浏览器自绘
-        ServerThumb::Unsupported(msg) => return Err(msg),
     }
-    // 旧管线（0.2.1 语义）：整文件入媒体缓存后本地缩放
+    // 旧管线（仅 Server ≤0.2.0 无 /thumb）：整文件静默入媒体缓存后本地缩放
     let src = srv_media_ensure(&app, &server_id, &root_id, &path, ver.as_deref()).await?;
     match crate::thumb::ensure_thumb(&st, &key, &src) {
-        Ok(t) => Ok(t.to_string_lossy().into_owned()),
-        Err(e) => {
+        Ok(t) => Ok(Some(t.to_string_lossy().into_owned())),
+        Err(_) => {
+            // 本地也解不了（svg 等）：≤8MiB 回原路径交浏览器自绘（与 fs_thumb 同形），否则永久无图
             if std::fs::metadata(&src).map(|m| m.len() <= 8 << 20).unwrap_or(false) {
-                Ok(src.to_string_lossy().into_owned())
+                Ok(Some(src.to_string_lossy().into_owned()))
             } else {
-                Err(e)
+                Ok(None)
             }
         }
     }
 }
 
 enum ServerThumb {
-    /// 服务端 0.2.1+：直接拿到 ≤512px JPEG 字节
+    /// 服务端：直接拿到 ≤512px JPEG 字节
     Bytes(Vec<u8>),
     /// 端点不存在（旧服务端）→ 旧管线
     Legacy,
-    /// 服务端明确不可生成（413/415/语义 401/403…），携带展示错误
-    Unsupported(String),
+    /// 服务端明确不可生成（413 过大/415 格式/403 权限）——永久无图，零下载零重试
+    Permanent,
+    /// 瞬时失败（网络/429 重试耗尽/401/5xx）——前端退避重试
+    Busy(String),
 }
 
 /// 拉服务端缩略图；429（生成器繁忙）退避 2s/4s 共试 3 次。
 async fn fetch_server_thumb(app: &AppHandle, server_id: &str, root_id: &str, path: &str) -> ServerThumb {
     let srv = match state(app).server(server_id) {
         Ok(s) => s,
-        Err(e) => return ServerThumb::Unsupported(e),
+        Err(e) => return ServerThumb::Busy(e),
     };
     let url = format!("{}/api/v1/thumb", base_of(&srv));
     for attempt in 0..3u64 {
@@ -1342,28 +1364,28 @@ async fn fetch_server_thumb(app: &AppHandle, server_id: &str, root_id: &str, pat
         .await
         {
             Ok(r) => r,
-            Err(e) => return ServerThumb::Unsupported(e),
+            Err(e) => return ServerThumb::Busy(e),
         };
         let status = resp.status();
         match status.as_u16() {
             200 => match resp.bytes().await {
                 Ok(b) => return ServerThumb::Bytes(b.to_vec()),
-                Err(e) => return ServerThumb::Unsupported(format!("缩略图流读取失败: {e}")),
+                Err(e) => return ServerThumb::Busy(format!("缩略图流读取失败: {e}")),
             },
             404 => return ServerThumb::Legacy, // 旧服务端无此端点
+            413 | 415 | 403 => return ServerThumb::Permanent,
             429 => {
                 if attempt < 2 {
                     tokio::time::sleep(Duration::from_millis(2000 << attempt)).await;
                     continue;
                 }
-                return ServerThumb::Unsupported("服务端缩略图生成繁忙，稍后重试".into());
+                return ServerThumb::Busy("服务端缩略图生成繁忙，稍后重试".into());
             }
-            413 | 415 => return ServerThumb::Unsupported("服务端不支持该文件的缩略图".into()),
             _ => {
                 let t = resp.text().await.unwrap_or_default();
-                return ServerThumb::Unsupported(api_error(status, &t));
+                return ServerThumb::Busy(api_error(status, &t));
             }
         }
     }
-    ServerThumb::Unsupported("服务端缩略图生成繁忙".into())
+    ServerThumb::Busy("服务端缩略图生成繁忙".into())
 }

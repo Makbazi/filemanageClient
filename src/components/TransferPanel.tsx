@@ -1,20 +1,38 @@
 // 传输面板（0.6.0 需求4/5/6）：任务注册表实时进度/速度，支持 暂停→继续 / 取消 / (覆盖)重试。
 // 仅入队任务（serverId 非空）带完整参数，可暂停续传；事件自动注册的任务只能取消。
 // 0.2.0 需求41：目录上传聚合为一条组行（文件计数进度；动作经 rowActions 走组级 API）。
+// 0.3.3 需求4：右下角显隐开关——面板头部"隐藏"收起为悬浮圆钮（带任务数角标），
+// 再点圆钮重新弹出（纯前端展示态，不影响队列执行；本会话内记忆）。
 import { useEffect, useState } from "react";
 import { subscribe, rowActions, type TransferTask } from "../lib/transfer";
 import { STATUS_LABEL } from "../lib/transtypes";
 import { fmtSize } from "../lib/format";
-import { IconDownload, IconPause, IconPlay, IconRefresh, IconUpload, IconX } from "./icons";
+import { IconDownload, IconPause, IconPlay, IconRefresh, IconTransfer, IconUpload, IconX } from "./icons";
 
 export default function TransferPanel() {
   const [items, setItems] = useState<TransferTask[]>([]);
+  const [open, setOpen] = useState(true);
   useEffect(() => subscribe(setItems), []);
   if (items.length === 0) return null;
 
+  if (!open) {
+    // 收起态：仅右下角悬浮按钮（点击重新展开面板）
+    return (
+      <button className="transfer-fab" title="显示传输面板" onClick={() => setOpen(true)}>
+        <IconTransfer size={18} />
+        <span className="transfer-fab-badge">{items.length}</span>
+      </button>
+    );
+  }
+
   return (
     <div className="transfer-panel card">
-      <div className="transfer-head">传输队列（{items.length}）</div>
+      <div className="transfer-head-row">
+        <div className="transfer-head">传输队列（{items.length}）</div>
+        <button className="mini" title="隐藏面板（右下角按钮可再次展开）" onClick={() => setOpen(false)}>
+          <IconX size={13} />
+        </button>
+      </div>
       {items.map((t) => {
         const pct = t.total > 0 ? Math.min(100, Math.round((t.sent / t.total) * 100)) : 0;
         const resumable = t.serverId !== "";

@@ -39,6 +39,7 @@ function defaultConfig(): AppConfig {
       closeAction: "tray",
       videoDecoder: "system",
       videoPlayerCmd: "",
+      ffmpegPath: "",
     },
     transfer: { uploadLimitKbps: 0, downloadLimitKbps: 0 },
     trashRetentionDays: 30,
@@ -174,6 +175,21 @@ export async function openMedia(path: string): Promise<void> {
 /** 设置页测试外部播放器命令，返回实际打开的探测文件路径（可能是 0 字节样本）。 */
 export async function testPlayerCommand(command: string): Promise<string> {
   return invoke("test_player_command", { command }) as Promise<string>;
+}
+
+// ---------- ffmpeg 转码播放（0.3.3 需求3） ----------
+
+/** 探测配置的 ffmpeg 可用性（设置页），成功返回版本首行；失败抛可读错误。 */
+export async function ffmpegProbe(): Promise<string> {
+  return invoke("ffmpeg_probe") as Promise<string>;
+}
+
+/** 媒体缓存视频 → 窗口内可播路径：容器 WebView 可直放时原路返回
+ *  （force=false）；否则 ffmpeg 转码 H.264 MP4 入媒体缓存（产物复用，
+ *  受磁盘 LRU 上限）。force=true 强制转码（系统解码失败兜底——容器
+ *  友好但编码不受支持的场景）。本命令不产生任何传输事件。 */
+export async function ffmpegPlayable(path: string, force = false): Promise<string> {
+  return invoke("ffmpeg_playable", { path, force: force ? true : null }) as Promise<string>;
 }
 
 export function fetchRoots(serverId: string): Promise<ServerRoot[]> {

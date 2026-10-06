@@ -78,10 +78,13 @@ export interface UiConf {
   lastServerId?: string | null;
   /** 关闭按钮(X)行为（0.3.0 需求2，默认 tray：隐藏到托盘；quit：退出程序） */
   closeAction: "tray" | "quit";
-  /** 视频播放方式（0.3.0 需求1，默认 system=WebView 系统解码器；external=外部播放器） */
-  videoDecoder: "system" | "external";
+  /** 视频播放方式（0.3.0 需求1；0.3.3 增 ffmpeg 档。默认 system=WebView 系统解码器；
+   *  ffmpeg=经配置的 ffmpeg 转码 H.264 MP4 后窗口内播放；external=外部播放器） */
+  videoDecoder: "system" | "ffmpeg" | "external";
   /** 外部播放器命令（0.3.0 需求1；空=系统关联播放器，支持 {file} 占位符） */
   videoPlayerCmd?: string | null;
+  /** ffmpeg 可执行文件路径（0.3.3 需求3；空=PATH 自动探测 "ffmpeg"，不内嵌） */
+  ffmpegPath?: string | null;
 }
 
 /** 已记住密码的服务端账户索引（0.6.0 需求3；密码本体存系统凭证库） */

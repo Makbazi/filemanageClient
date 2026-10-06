@@ -923,27 +923,30 @@ pub async fn fs_media_cache(
     Ok(p.to_string_lossy().into_owned())
 }
 
-/// 网格视图缩略图（0.2.1）：确保媒体缓存条目后，在缓存目录生成/复用
-/// ≤512px JPEG（`<key_hash>.thumb.jpg`），返回绝对路径供 convertFileSrc。
-/// 无法缩放解码（svg/ico/heic 等）时：原文件 ≤8MiB 直接回传缓存原路径交给
-/// 浏览器渲染，否则报错由前端回退类型图标。
+/// 网格视图缩略图（0.2.1；0.3.3 契约对齐 srv_thumb）：确保媒体缓存条目后，在
+/// 缓存目录生成/复用 ≤512px JPEG（`<key_hash>.thumb.jpg`），前端经
+/// media_read_bytes 建 blob 上屏。
+///  - `Ok(Some(path))` = 缩略图（或 ≤8MiB 原路径交浏览器自绘，svg/ico/heic 等）；
+///  - `Ok(None)` = **永久无图**（解不了且 >8MiB）——直接落图标，不再按瞬时错误
+///    空转重试 3 轮（0.3.2 契约瑕疵：本地解码失败本是确定性结局）；
+///  - `Err` = 瞬时失败（缓存条目建立失败等），前端退避重试。
 #[tauri::command]
 pub async fn fs_thumb(
     app: AppHandle,
     root_id: String,
     path: String,
     ver: Option<String>,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let st = state(&app);
     let src = media_cache_path(&st, &root_id, &path, ver.as_deref())?;
     let key = cache_key(&root_id, &path, ver.as_deref());
     match crate::thumb::ensure_thumb(&st, &key, &src) {
-        Ok(t) => Ok(t.to_string_lossy().into_owned()),
-        Err(e) => {
+        Ok(t) => Ok(Some(t.to_string_lossy().into_owned())),
+        Err(_) => {
             if fs::metadata(&src).map(|m| m.len() <= 8 << 20).unwrap_or(false) {
-                Ok(src.to_string_lossy().into_owned())
+                Ok(Some(src.to_string_lossy().into_owned()))
             } else {
-                Err(e)
+                Ok(None)
             }
         }
     }

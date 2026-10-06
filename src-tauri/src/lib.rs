@@ -219,6 +219,9 @@ pub fn run() {
             // 外部播放器（0.3.0 需求1：系统解码失败兜底 / 可配置播放器 / 设置页测试）
             player::open_media,
             player::test_player_command,
+            // ffmpeg 转码播放（0.3.3 需求3：ffmpeg 档位 + 设置页探测；不内嵌 ffmpeg）
+            player::ffmpeg_probe,
+            player::ffmpeg_playable,
             // 记住的服务端账户密码（0.6.0 需求3）
             serverapi::cred_take,
             serverapi::cred_forget,

@@ -10,7 +10,8 @@
 
 | filemanageClient | 配套 filemanageServer | 说明 |
 |---|---|---|
-| 0.3.2（当前） | **0.2.x（推荐；当前 Server 0.2.1）**；配 Server ≤0.2.0 逐条自动退化（下行"退化矩阵"） | 本批用户清单 1/2/3/4/5/6 条（上传中断兜底+缩略图体系）。**依赖 Server 0.2.1 两个新端点的功能均为可选加速面**：`GET /thumb`（网格浏览零下载——只回缩略图字节不再整文件入缓存）；`POST /check`（目录重传预检：相同跳过/同名不同内容弹窗询问）。404（旧服务端）时：缩略图自动走 0.2.1 旧管线（整文件入缓存后本地缩放，现受 10GB LRU 约束）、目录重传回到 0.2.0 冲突语义（全量重传+409 覆盖重试）。**与新增端点无关的断连修复对配任何版本服务端都生效**：分片重试、complete 移出 120s 超时通道+断连轮询（本批主根因修复）、坏会话 DELETE 重建、取消作废服务端会话、GET/DELETE /upload/session 接线（端点 0.1.x 起即有）。新增本地能力：上传账本（localdb user_version 2，重启续传）、磁盘缓存 ≤10GB LRU+孤儿清理+设置页用量/清空、缩略图内存 ≤2GB blob LRU+IntersectionObserver 视口调度（可见±2 屏，全量无 60 上限）；新 Rust 依赖 sha2（锁内 0.10.9 提为直接依赖，零新下载）；CSP/capabilities 零改动（blob: 已在 img-src，字节走 IPC ArrayBuffer 不 fetch asset） |
+| 0.3.3（当前） | **0.2.x（推荐；当前 Server 0.2.2）**；0.2.1/0.2.0/0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 本批用户清单 1/2/3/4/5 条（查看零传输 + 缩略图对齐 + ffmpeg 可配 + 传输面板显隐）。**数据协议零变更**——全部能力为客户端本地行为（fm-transfer 静默化、srv_thumb 契约收紧、ffmpeg 转码、面板显隐）或既有端点的行为面（Server 0.2.2 的 /thumb 白名单补 BMP 为服务端加性能力）。配 0.2.2：网格 BMP 出图与本地一致；配 0.2.1：BMP 服务端 415 → 永久图标（≤8MiB 不再整文件兜底——需求"浏览不触发下载"的收紧面）；配 ≤0.2.0（无 /thumb）：缩略图回退旧管线整文件**静默**入媒体缓存+本地缩放（0.3.2 已声明的兼容面，0.3.3 起该通道不出任何传输行）。ffmpeg 档依赖用户自备 ffmpeg（未内嵌），未配置时系统解码失败面板回落"外部播放器"旧兜底。三处版本源 0.3.2→0.3.3 |
+| 0.3.2 | **0.2.x（推荐；当前 Server 0.2.1）**；配 Server ≤0.2.0 逐条自动退化（下行"退化矩阵"） | 本批用户清单 1/2/3/4/5/6 条（上传中断兜底+缩略图体系）。**依赖 Server 0.2.1 两个新端点的功能均为可选加速面**：`GET /thumb`（网格浏览零下载——只回缩略图字节不再整文件入缓存）；`POST /check`（目录重传预检：相同跳过/同名不同内容弹窗询问）。404（旧服务端）时：缩略图自动走 0.2.1 旧管线（整文件入缓存后本地缩放，现受 10GB LRU 约束）、目录重传回到 0.2.0 冲突语义（全量重传+409 覆盖重试）。**与新增端点无关的断连修复对配任何版本服务端都生效**：分片重试、complete 移出 120s 超时通道+断连轮询（本批主根因修复）、坏会话 DELETE 重建、取消作废服务端会话、GET/DELETE /upload/session 接线（端点 0.1.x 起即有）。新增本地能力：上传账本（localdb user_version 2，重启续传）、磁盘缓存 ≤10GB LRU+孤儿清理+设置页用量/清空、缩略图内存 ≤2GB blob LRU+IntersectionObserver 视口调度（可见±2 屏，全量无 60 上限）；新 Rust 依赖 sha2（锁内 0.10.9 提为直接依赖，零新下载）；CSP/capabilities 零改动（blob: 已在 img-src，字节走 IPC ArrayBuffer 不 fetch asset） |
 | 0.3.1 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | **纯构建体系修复，功能与兼容关系与 0.3.0 完全一致、数据协议零变更、产物代码零变更**：win10 交叉编译镜像补装 `libayatana-appindicator3-dev`——tauri-cli 在 Linux 宿主开启 tray-icon 特性后无条件探测 appindicator（判宿主机不判 `--target`），0.3.0 的 NSIS 打包因此崩溃（Jenkins #48），本版本修复后 Windows 产物正常产出 |
 | 0.3.0 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.1 兼容关系**零变更、数据协议零变更**：H.264/H.265 播放 = WebView 原生**系统解码器**（Windows Media Foundation / Linux GStreamer）+ 可配置**外部播放器**兜底（字节仍取既有 `GET /api/v1/preview` 媒体缓存通道，Server 不感知）；托盘常驻/关窗行为/单实例/`open_media`·`test_player_command` 均为客户端本地 Rust 行为，不跨进程。Linux 托盘运行期依赖 appindicator（deb depends `libayatana-appindicator3-1`）。⚠️ 该 tag 的 windows10 产物因编译环境探测崩溃未产出，由 0.3.1 修复 |
 | 0.2.1 | **0.2.x（推荐；当前 Server 0.2.0）**；0.1.x/0.7.x/0.6.x/0.5.x 亦可用 | 承接 0.2.0 兼容关系**零变更、数据协议零变更**：网格缩略图全量显示与相机 RAW（NEF/CR2/ARW/RAF…）查看/预览均为客户端本地 Rust 行为——字节仍取自既有 `GET /api/v1/preview` 媒体缓存通道（同端点同权限、匿名语义不变，需求6 无新增面）；新增 `fs_thumb`、`srv_thumb` 改版（改返回媒体缓存缩略图路径、加 ver）属本地 Rust 命令契约，不跨进程。目录上传仍依赖 Server ≥0.2.0 |
@@ -19,6 +20,51 @@
 | ≤0.6.1 | 0.5.x–0.7.x | 见 git 历史（已按需求39清空） |
 
 ## 未发布版本
+### 修复+新增：查看零传输 + 缩略图对齐 + ffmpeg 可配转码 + 传输面板显隐（2026-10-06，0.3.3；配 Server 0.2.2，对旧服务端零退化成本）
+- **需求原句**（用户 2026-10 第二批清单）：①查看服务端视频触发了下载——查看服务端文件不得触发
+  传输，上传下载只许手动触发；②服务端按缩略图预览也要滚动到哪里哪里显示，向上向下缓存与本地
+  目录机制保持一致；③可在设置界面配置 ffmpeg 用于视频解码播放，默认系统解码但允许用户配置；
+  ④右下角上传/下载弹窗要可关闭、按按钮可再弹出（显隐）；⑤版本 Client 0.3.3 / Server 0.2.2。
+- **查看零传输（serverapi.rs 主修，需求①）**：根因——查看/预览的媒体缓存取字节
+  （`srv_media_ensure`→`download_inner`，transfer_id=`media-<hash>`）发 fm-transfer 事件，
+  前端 `applyEvent` 把未入队 id **自动注册为可见下载行**（服务端视频一打开右下角就挂出
+  "下载"，缩略图旧管线回退同理）。修复：`download_inner` 增 `silent` 参数——查看/预览/缩略图
+  通道传 `silent=true`，**不发任何事件**（手动上传/下载恒传 false，暂停/进度/完成语义不变）；
+  字节仍走既有 `GET /api/v1/preview`（权限/匿名语义零变化，查看允许临时落盘进缓存的既定边界
+  保留）。此后传输面板/传输页只出现用户手动发起的上传下载。
+- **缩略图契约收紧（需求②，出图面与服务端 0.2.2 对齐）**：`srv_thumb` 返回改
+  `Result<Option<String>, String>`——**Ok(None)=永久无图**（413/415/403：服务端明确出不了图，
+  直接落图标，不再按瞬时错误空转重试 3 轮、不再整文件下载兜底）；Err=瞬时（网络/429 重试耗尽/
+  401/5xx，FileView 队列退避 ≤3 轮不变）。`size_hint` 参数移除（回退闸门随整文件兜底一起废除）。
+  旧管线（`ensure_thumb` 失败且 ≤8MiB 回原路径交浏览器自绘，与本地 fs_thumb 同形）仅保留给
+  Server ≤0.2.0 的 404 退化面。`fs_thumb` 同步对齐：解码不了且 >8MiB 由 Err 改 Ok(None)。
+  视口调度本就双模共用（IntersectionObserver 可见±2 屏 + 内存 blob LRU + 磁盘 LRU），
+  配 Server 0.2.2（/thumb 白名单补 BMP）后**服务端网格出图能力=本地目录机制**：
+  滚到哪出到哪、jpg/png/gif/bmp/RAW 直出，webp 等 ≤8MiB 静默缓存交本地解码（超限图标）。
+  游客依旧直接图标（/thumb 与 /preview 同守卫，匿名不可达——与既有语义一致）。
+- **ffmpeg 转码播放（需求③，player.rs+config.rs，不内嵌 ffmpeg）**：`ui.videoDecoder`
+  三档化 `system`（默认，行为零变化）| `ffmpeg` | `external`；新 `ui.ffmpegPath`
+  （serde default None=PATH 探测 "ffmpeg"）。新命令：`ffmpeg_probe`（`-version` 首行，
+  设置页可用性探测）与 `ffmpeg_playable(path, force)`（限媒体缓存目录内文件——复用
+  `guarded_cache_path` 纵深防御；容器 WebView 可直放（mp4/m4v/mov/webm/m4a/mp3/ogg/ogv）且
+  非 force 时原路返回；否则 `tokio::process` 起 `ffmpeg -y -i in -map_metadata -1 -c:v libx264
+  -preset veryfast -crf 23 -pix_fmt yuv420p -c:a aac -movflags +faststart out`
+  转码 `<hash>.ffmpeg.mp4` 落媒体缓存（存在即复用+touch；失败删半成品、报错带 stderr 尾 400 字
+  按字符截断；Windows creation_flags 防闪窗），产物经 `note_media_write` 计入磁盘 LRU）。
+  FileViewer：ffmpeg 档取完媒体缓存即转码上屏（容器友好则零转码直接复用系统解码）；
+  system 档解码失败面板新增**[用 ffmpeg 转码播放]**（force=true——容器友好但编码不支持也重转）；
+  ffmpeg 不可用时面板报"去设置配置路径"+保留外部播放器兜底。PreviewModal 失败面板同样给转码
+  入口（弹窗不自动转码，防惊吓）。设置→外观：三档 radio + "ffmpeg 路径"输入（Enter/失焦提交）
+  + [探测 ffmpeg] 按钮。`fm-transfer` 事件零新增（转码是本机 CPU 行为，不进传输面板）。
+  Cargo.toml tokio 增 `process` 特性。**0.3.0"不内嵌 ffmpeg"边界改为"用户自备可选配置"**。
+- **传输面板显隐（需求④，TransferPanel.tsx）**：面板头部加 [隐藏]（IconX）→ 收起为右下角
+  悬浮圆钮（.transfer-fab，46px，IconTransfer + 任务数角标，与面板同层 z=150——模态/Toast
+  层叠契约不变）；再点圆钮展开。显隐为纯展示态（队列照常执行/暂停/续传不受影响），
+  会话内记忆、任务清零时整体消失（既有行为）。
+- 版本号三处 0.3.2→0.3.3；设置→关于"配套服务端"文案更新 0.2.2。
+- **验证**：`npm run build` ✓；`cd src-tauri && cargo check` ✓（零警告）。运行时人工验证：
+  服务端视频查看不出传输行、BMP 网格出图（配 0.2.2）、ffmpeg 转码播放、面板显隐。
+
 
 ### 修复+新增：上传中断兜底 + 缩略图全显与双层缓存 + 浏览零下载（2026-10-06，0.3.2；配 Server 0.2.1 新端点，对旧服务端逐条退化）
 - **需求原句**（用户 2026-10 清单，含服务端事故日志 PUT /upload/chunk 卡 2m33s 后 connection reset）：
