@@ -29,7 +29,7 @@ import { IconPlus, IconTrash, IconPencil } from "./icons";
 
 interface Props {
   cfg: AppConfig;
-  /** 打开时定位的页签（侧栏"用户"按钮直达账户页，0.5.0） */
+  /** 打开时定位的页签（侧栏"用户"按钮直达账户页） */
   initialTab?: Tab;
   onSave(next: AppConfig): Promise<void>;
   onClose(): void;
@@ -61,7 +61,7 @@ export default function Settings(p: Props) {
   const [cacheStats, setCacheStats] = useState<{ files: number; bytes: number; limitBytes: number } | null>(null);
   const [clearing, setClearing] = useState(false);
   const [srvForm, setSrvForm] = useState<{ idx: number; conf: ServerConf } | null>(null);
-  // 明文 http 保存前的二次确认（0.4.0 安全升级）
+  // 明文 http 保存前的二次确认
   const [httpWarn, setHttpWarn] = useState<ServerConf | null>(null);
   const [info, setInfo] = useState<AppInfo>({ name: "FileManage", version: "", tauri: "" });
   // 0.3.0 需求1：外部播放器命令草稿（Enter/失焦提交 uiSet）与测试按钮状态
@@ -400,7 +400,7 @@ export default function Settings(p: Props) {
               checked={cfg.ui.restoreSessions !== false}
               onChange={(e) => uiSet({ restoreSessions: e.target.checked })}
             />
-            启动时恢复各服务端登录状态（0.6.0 需求9：上次保持登录的重开后仍是登录态；
+            启动时恢复各服务端登录状态（需求9：上次保持登录的重开后仍是登录态；
             关闭则每次启动全部退出——已记住的密码保留，退出状态的服务端可一键快速重登）
           </label>
           {/* 0.3.0 需求1 / 0.3.3 需求3：H.264/H.265 播放三档——系统解码器（默认）/
@@ -725,7 +725,7 @@ export default function Settings(p: Props) {
   );
 }
 
-// ---------- 账户页（0.5.0）：当前来源身份管理 ----------
+// ---------- 账户页：当前来源身份管理 ----------
 // 未登录 → 点击登录；已登录 → 显示身份与可访问目录，可切换账户（登出并换身份重登）/退出登录。
 
 interface MeInfo {
@@ -922,7 +922,7 @@ function AboutTab(p: { info: AppInfo }) {
       </div>
       <div className="list-row">
         <span className="dim">配套服务端</span>
-        <span className="about-val">0.2.x（推荐，当前 0.2.2）· 0.1.x / 0.7.x / 0.6.x / 0.5.x 可用</span>
+        <span className="about-val">0.2.x（推荐，当前 0.2.3）· 0.1.x 可用</span>
       </div>
       <p className="dim tip">
         版本号读自安装包自身元数据：构建脚本以 -V 指定产物版本时，这里显示的就是该注入值（不改动工程版本源文件）。

@@ -34,7 +34,7 @@ pub struct ServerConf {
     /// 信任自签证书（服务端 TLS 使用自签证书时开启，需求3）
     #[serde(default)]
     pub insecure_tls: bool,
-    /// 指定 CA 证书文件路径（PEM，0.4.0 安全升级：优先于 insecure_tls，避免全盘跳过校验）
+    /// 指定 CA 证书文件路径（PEM：优先于 insecure_tls，避免全盘跳过校验）
     #[serde(default)]
     pub ca_file: Option<String>,
 }
@@ -110,7 +110,7 @@ pub struct LastLocation {
     pub view_mode: String, // list | grid
 }
 
-/// 已"记住密码"的服务端账户索引（0.6.0 需求3）。密码本体存系统凭证库
+/// 已"记住密码"的服务端账户索引（需求3）。密码本体存系统凭证库
 /// （key 为 {serverId}/{username}/password），config.json 只存非敏感索引；
 /// 同一服务端可有多条（多账户），同一账户配到不同服务端按 serverId 隔离。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,15 +138,15 @@ pub struct UiConf {
     /// 按文件类型分组显示（需求15）
     #[serde(default)]
     pub group_by_kind: bool,
-    /// 左侧导航栏是否折叠为小箭头标签（0.4.0；默认折叠，点击标签显隐）
+    /// 左侧导航栏是否折叠为小箭头标签（默认折叠，点击标签显隐）
     #[serde(default = "default_true")]
     pub sidebar_collapsed: bool,
-    /// 启动时是否恢复各服务端登录状态（0.6.0 需求9）。
+    /// 启动时是否恢复各服务端登录状态（需求9）。
     /// true（默认）：上次保持登录的服务端重启后仍为登录态，可直接打开远程；
     /// false：启动时清除全部令牌，所有服务端置为退出状态（已记住的密码保留）。
     #[serde(default = "default_true")]
     pub restore_sessions: bool,
-    /// 快速切换第二按钮指向的远程服务端 id（0.6.0 需求10）
+    /// 快速切换第二按钮指向的远程服务端 id（需求10）
     #[serde(default)]
     pub last_server_id: Option<String>,
     /// 关闭按钮(X)行为（0.3.0 需求2）：tray=隐藏到托盘（默认；托盘不可用环境
@@ -264,10 +264,10 @@ pub struct AppConfig {
     pub ui: UiConf,
     #[serde(default)]
     pub transfer: TransferConf,
-    /// 本地回收站自动清理保留天数（0.4.0，需求：与服务端各自独立的 30 天清理）
+    /// 本地回收站自动清理保留天数（需求：与服务端各自独立的 30 天清理）
     #[serde(default = "default_trash_days")]
     pub trash_retention_days: i64,
-    /// 已记住密码的服务端账户索引（0.6.0 需求3；密码本体在系统凭证库）
+    /// 已记住密码的服务端账户索引（需求3；密码本体在系统凭证库）
     #[serde(default)]
     pub credentials: Vec<CredRef>,
     /// 媒体/缩略图缓存配额（0.3.2 需求3/4/5）
@@ -292,7 +292,7 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// 副本：清空服务端令牌——令牌存系统凭证库后 config.json 不再落盘明文（0.4.0）。
+    /// 副本：清空服务端令牌——令牌存系统凭证库后 config.json 不再落盘明文。
     pub fn without_tokens(&self) -> AppConfig {
         let mut c = self.clone();
         for s in c.servers.iter_mut() {
@@ -311,7 +311,7 @@ pub struct AppState {
     /// 本地元数据库（localdb.sqlite3）。rusqlite Connection 为 Send 非 Sync，用 Mutex 保护；
     /// 取锁仅限同步段，禁止跨 .await 持有。
     pub db: std::sync::Mutex<rusqlite::Connection>,
-    /// 系统凭证库可用性（true 时 token 存 keyring，config.json 不落盘明文；0.4.0）。
+    /// 系统凭证库可用性（true 时 token 存 keyring，config.json 不落盘明文）。
     pub keyring_ok: bool,
 }
 
@@ -346,7 +346,7 @@ impl AppState {
         } else {
             eprintln!("提示: 系统凭证库不可用，服务端令牌将以明文存于 config.json（建议启用 Keychain/Keyring/Secret Service）");
         }
-        // 0.6.0 需求9：关闭"启动恢复登录状态"时，上次保持登录的服务端在启动时一律置为退出
+        // 需求9：关闭"启动恢复登录状态"时，上次保持登录的服务端在启动时一律置为退出
         // （清内存令牌 + 凭证库令牌；已记住的密码保留，供下次快速登录）。
         if !cfg.ui.restore_sessions {
             let had = cfg.servers.iter().any(|s| s.token.is_some() || s.refresh_token.is_some());
@@ -385,7 +385,7 @@ impl AppState {
         let mut guard = self.config.write().expect("config lock");
         let prev_ids: Vec<String> = guard.servers.iter().map(|s| s.id.clone()).collect();
         let prev_creds: Vec<CredRef> = guard.credentials.clone();
-        // 0.6.0（需求1）：记录变更前的令牌，keyring 只写真正变化的条目——
+        // 需求1：记录变更前的令牌，keyring 只写真正变化的条目——
         // 前端位置持久化每 ~800ms 触发一次 save，全量重写会造成 Secret Service IPC 风暴。
         let prev_tokens: Vec<(String, Option<String>, Option<String>)> = guard
             .servers

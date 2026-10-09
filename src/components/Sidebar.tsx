@@ -26,7 +26,7 @@ interface Props {
   cfg: AppConfig;
   view: View;
   roots: { id: string; name: string }[]; // 当前服务端的根列表（本地模式为 localRoots）
-  /** 折叠态：只渲染一个小箭头标签（0.4.0，默认折叠） */
+  /** 折叠态：只渲染一个小箭头标签（默认折叠） */
   collapsed: boolean;
   onView(v: View): void;
   onToggleCollapse(): void;

@@ -53,7 +53,7 @@ src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView Tra
                        注入的产物版本一致；core:app:default 已授权，权限零改动）
                        （TransfersView：任务注册表管理页，侧栏"传输"入口带未完成任务角标，
                        全部/上传/下载筛选；ContextMenu/UploadToDialog：本地文件右键上传到
-                       一个/多个远程（0.6.0 需求7））
+                       一个/多个远程（需求7））
                        （0.3.0：外观页签新增"关闭按钮（X）行为"select（托盘/退出，默认托盘）
                        与"视频播放（H.264/H.265）"radio+外部播放器命令输入（Enter/失焦提交）+
                        测试按钮，均 uiSet 即时持久化；FileViewer/PreviewModal 视频 onError 兜底
@@ -169,7 +169,7 @@ cd src-tauri && cargo check
    再分别实现 local.ts / server.ts（服务端缺失能力时用 caps 位屏蔽 UI）。
 3. **路径安全**：本地操作全部经 Rust `resolve_in_root`（拒绝 `..`/绝对路径逃逸）；
    前端不得拼接绝对路径直接读写（导入/导出只经对话框选择的 `fs_import`/`fs_export`；
-   0.4.0 已下线任意路径的 `fs_read/write_bytes_b64`，不得恢复）。
+   历史批次已下线任意路径的 `fs_read/write_bytes_b64`（并入基线），不得恢复）。
    令牌一律经 `secret.rs` 入系统凭证库，config.json 不落盘明文（回退场景除外）。
 4. **游客只读（需求6）**：`source().anonymous === true` 时禁用一切写操作 UI（含下载按钮置灰）；
    401/AUTH_REQUIRED → App.tsx 统一处理 AuthError：**显式操作**（切换服务端/点登录/游客上传）
@@ -179,7 +179,7 @@ cd src-tauri && cargo check
    禁止以 `cfg?.active` 等对象引用作 effect 依赖（saveConfig 每次返回新对象会形成
    "保存→刷新"死循环并导致登录框反复弹出）。
 5. **传输**：服务端上传/下载一律经 `transfer.enqueue` 入队执行（任务注册表：暂停→
-   断点续传 / 失败重试 / 覆盖重试在 TransferPanel，0.6.0 需求4/5/6），UI 不直接
+   断点续传 / 失败重试 / 覆盖重试在 TransferPanel，需求4/5/6），UI 不直接
    await 传输命令；本地模式导入/导出即时执行并经 `reportLocal` 记进度。
    任务 id=transferId（`uid()`），进度经 `fm-transfer` 事件（未入队 id 自动注册为
    展示任务）；取消/暂停用 `transfer_cancel(pause)`；上传覆盖的 BaseHash 在任务
@@ -259,7 +259,7 @@ cd src-tauri && cargo check
 12. **本地元数据一律经 localdb.rs（localdb.sqlite3）**：AI 描述/回收站/版本索引不再
     写 `*.json`（`config.json` 仍为文件）；`AppState.db` 是 `Mutex<Connection>`，
     **禁止跨 `.await` 持锁**；表结构变更走 `PRAGMA user_version` 迁移链，保持幂等。
-13. **登录态单一事实源（0.6.0 需求1/8）**：服务端 token/refreshToken 与已记住账户
+13. **登录态单一事实源（需求1/8；0.3.4 起凭证为服务端认证图随机值——token 与 refreshToken 同串，仍是 Rust 侧独占权威状态）**：服务端 token/refreshToken 与已记住账户
     凭证（credentials 索引 + keyring 密码）是 **Rust 侧独占的权威状态**——只有
     `srv_login`/`srv_logout`/`srv_change_password`/`try_refresh`/`cred_forget` 可以变更，任何变更必须
     `app.emit("fm-config-changed")`，前端 App 监听该事件同步（loadConfig +
@@ -278,7 +278,8 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.3.3（查看零传输 + 缩略图契约收紧 + ffmpeg 可配转码 + 传输面板显隐）+ 0.3.2（上传中断兜底 + 缩略图全显与双层缓存 + 浏览零下载）+ 0.3.1（win10 交叉编译环境修复：镜像补装 appindicator 开发包——纯 build-env 变更，产物代码/数据协议零变更）+ 0.3.0（H.264/H.265 视频播放体系 + 系统托盘常驻）+ 0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.2）** / 0.1.x / 0.7.x / 0.6.x。
+0.3.4（认证协议配套批：服务端去 JWT 后的凭证透明承接，客户端代码零改动 + 文档/版本号定版）+ 0.3.3（查看零传输 + 缩略图契约收紧 + ffmpeg 可配转码 + 传输面板显隐）+ 0.3.2（上传中断兜底 + 缩略图全显与双层缓存 + 浏览零下载）+ 0.3.1（win10 交叉编译环境修复：镜像补装 appindicator 开发包——纯 build-env 变更，产物代码/数据协议零变更）+ 0.3.0（H.264/H.265 视频播放体系 + 系统托盘常驻）+ 0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.3）** / 0.1.x。
+**0.3.4（2026-10-10 用户第三批清单第 3 条；配 Server 0.2.3，客户端代码零改动）**：服务端认证重构去 JWT——登录/刷新响应中的 `token` 变为服务端三层认证图签发的**不透明随机凭证**（64-hex 随机哈希形态，不编码任何身份；真实 user id/username 存服务端）。客户端本就对凭证无格式假设（不解析、只 bearer_auth 透传、keyring 存取），**全链路零改动**：`refreshToken` 字段为同一凭证的兼容别名（token/refreshToken 同串），401→`try_refresh`→重试、logout、change-password、分享 st、keyring 存取语义全部不变；`/auth/me` 回显 `{id,username,role}` 账户页照常。升级 Server 0.2.3 后的一次性影响=存量会话失效、重登一次（既有 AUTH_REQUIRED 登录框路径承接，无新增面）。本批变更：三处版本源 0.3.3→0.3.4、serverapi.rs/secret.rs/config.rs 认证注释按不透明凭证改写（行为零变更）、设置"关于"配套服务端文案 0.2.x（推荐，当前 0.2.3）·0.1.x 可用。兼容矩阵：0.3.4 配 Server ≤0.2.2 亦无感（协议字段形状未变，凭证内容对客户端始终不透明）。
 **0.3.3（2026-10-06 用户清单 1–5 条；数据协议零变更，缩略图 BMP 对齐依赖 Server 0.2.2）**：需求原句——查看服务端视频触发了下载，查看服务端文件不得触发传输、上传下载只许手动触发；服务端按缩略图预览也要滚动到哪里哪里显示、向上向下缓存和本地目录机制保持一致；可在设置界面配置 ffmpeg 用于视频解码播放、默认系统解码但允许用户配置；右下角上传下载弹窗可关闭、按按钮可再弹出（显隐）；版本 0.3.3/0.2.2。实施——`download_inner` silent 化（media-<hash> 通道零事件，本批主修"看视频出下载行"；查看允许临时落盘进缓存的既定边界不变）；`srv_thumb`/`fs_thumb` 契约收紧（413/415/403=永久无图 null、不整文件兜底、size_hint 移除；视口 IO±2 屏/双层缓存本就双模共用，配 0.2.2 后服务端网格出图能力=本地机制：滚到哪出到哪）；`ui.videoDecoder` 三档 system|ffmpeg|external + `ui.ffmpegPath` + 新命令 `ffmpeg_probe`/`ffmpeg_playable`（H.264 MP4 转码入媒体缓存复用、零传输事件、不内嵌 ffmpeg、失败按面板提示走外部播放器兜底）；TransferPanel 头部隐藏↔右下角 .transfer-fab 圆钮显隐（会话内展示态，队列执行不受影响）。Cargo.toml tokio 增 `process` 特性；CSP/capabilities/`/api/v1` 协议零改动。三处版本源 0.3.2→0.3.3。
 **0.3.2（2026-10-06 用户清单 1–6 条；依赖 Server 0.2.1 加性端点，配 ≤0.2.0 逐条退化）**：需求原句——上传目录中途断连要修；中断后重传同一目录要相同文件校验+兜底（未完成恢复/碎片清理）；缩略图可见±2屏缓存、内存≤2GB、磁盘≤10GB、有清理更新机制；图片再多也要全量显示；打开服务端文件/文件夹不得触发下载（查看允许临时落盘纳入上限淘汰——维护者确认；磁盘缓存跨退出保留）。断连主根因与修复：**complete 被 srv_call 120s 总超时掐断→服务端已成功客户端报失败→重试撞 409 风暴**——complete 独立提交（stream client+15min）且断连后只轮询 `GET /upload/session` 判 completed 绝不重发；分片网络级重试（1/2/4s 退避≤3）；reqwest Client 按服务端复用+tcp_keepalive；坏会话（size 变）DELETE 重建；**取消即时 DELETE 会话清 staging**；FM_* 前缀错误路由。**目录重传预检**：`POST /check` 两遍（先 size，unknown 集 `fs_file_hashes` 补 SHA-256 复查）→ 相同自动跳过、同名不同内容 `uploadDiff` 弹窗逐行覆盖/跳过（覆盖 baseHash ""，服务端覆盖前存版本）→ 旧服务端 404 整体退化为 0.2.0 冲突语义。**上传账本**（localdb user_version 2 upload_groups/upload_items）：Rust 回写会话/终态，TransfersView"未完成的上传组 [继续][放弃]"重启续传（done 跳过、failed 覆盖语义、放弃逐 session DELETE），终态组 7 天启动回收。**缩略图体系**：IntersectionObserver（root=.page，rootMargin 上下 2 屏）驱动无上限优先级队列（废除 slice(0,60)；失败退避 2/8/30s ≤3 轮；键=来源标识+path@mtime；目录切换复位）；`srv_thumb` 优先服务端 `/thumb`（**浏览零下载**）；内存 `thumbcache.ts` blob LRU（`media_read_bytes` IPC ArrayBuffer；CSP/capabilities 零改动）；磁盘 `cachemgr.rs` ≤10GB mtime-LRU（hard_link 条目纪律/24h 孤儿回收/300s 巡检/设置页用量+清空）。新增直接依赖 sha2（锁内 0.10.9 提升，零新下载）。三处版本源 0.3.1→0.3.2。
 **0.3.1（2026-10-05 win10 构建环境修复；产物代码零变更、数据协议零变更）**：0.3.0 启用 tauri `tray-icon` 后，tauri-cli 2.11.4 在 Linux 宿主打包时无条件 pkg-config 探测 appindicator（门控是宿主机 `#[cfg(target_os="linux")]`，与 `--target`/`--bundles` 无关；上游 dev 亦未修），win10 交叉镜像缺 dev 包致 NSIS 阶段 panic（Jenkins #48，exe 编译成功）。修复：`build-env/Dockerfile.ubuntu22.04-win10` 在 rust 层后新增独立层装 `libayatana-appindicator3-dev`（仅供 CLI 宿主机侧探测，不参与 Windows 链接；三个 Linux 镜像本就装有）。**契约提醒：win10 镜像必须保留该 dev 包——tauri feature 含 tray-icon 期间删除即复现打包崩溃**；镜像改动需 `./build.sh -i -a windows10` 重建并 push harbor 才对 CI（`-n` 按 tag 拉取）生效。详见 build-env/README.md。
@@ -328,19 +329,20 @@ Esc 先退全屏再关查看。已知边界：文本 >8MiB 仍报过大；服务
 成功后同步更新 keyring 里已记住的旧口令（`secret::set_password`）、清空该服务端
 token/refresh（服务端已作废全部 refresh 会话）、`app.emit("fm-config-changed")`，
 前端回未登录态提示用新密码重登。仅普通用户可用（服务端拒绝管理员含超管登录客户端，需求36）。
-对服务端为加性依赖：配 0.7.x/0.6.x 服务端时改密端点 404/405（报"接口不存在"），其余功能不变。
-0.6.1 批次（需求1）：修复"账户页登录/取消后返回账户页"（Dialog login 分支加
+对服务端为加性依赖：配不含该端点的旧服务端时改密请求 404/405（报"接口不存在"），其余功能不变。
+历史批次（需求1，已并入基线）：修复"账户页登录/取消后返回账户页"（Dialog login 分支加
 `from:"settings"` 来源标记，App.tsx 单点改动；无协议变化）。
-Server 0.7.0 起用户获得家目录虚拟根 `_users:<用户名>`（含内嵌回收站，服务端侧隐藏），
-客户端按既有 jail 虚拟根透明处理即可，无需改动。0.6.0 批次（需求1–14）：传输任务注册表+管理页
+服务端基线起用户获得家目录虚拟根 `_users:<用户名>`（含内嵌回收站，服务端侧隐藏），
+客户端按既有 jail 虚拟根透明处理即可，无需改动。历史批次（需求1–14，已并入基线）：传输任务注册表+管理页
 （上传/下载入队、暂停→断点续传、重试/覆盖重试、统一"传输"界面带方向筛选）、
 记住密码快速登录（keyring 按服务端+账户）、restoreSessions 开关、快速切换改版
 （本地+选中远程+"更多"下拉）、本地文件右键上传到多个远程、登录态事件同步
 （fm-config-changed + save_config 不再回写令牌）、admin 只留在服务端管理台。
-0.5.0；曾配套 filemanageServer 0.5.x（jail 模型）。0.4.0 批次：keyring 令牌存储、
-CA 证书导入、https 强制确认、CSP、游客下载置灰、左侧可折叠导航栏（默认小箭头标签）、
-本地回收站 30 天自动清理、双视图显式预览按钮；移除 fs_read/write_bytes_b64。
-0.5.0 批次：设置"用户管理"页替换为"账户"页（登录态/身份/被分配目录/切换账户/退出，
+以上历史批次均早于需求39 的服务端重基线（旧服务端编号不再引用）。
+历史批次（已并入基线）：keyring 令牌存储、CA 证书导入、https 强制确认、CSP、游客下载置灰、
+左侧可折叠导航栏（默认小箭头标签）、本地回收站 30 天自动清理、双视图显式预览按钮；
+移除 fs_read/write_bytes_b64。
+历史批次（已并入基线）：设置"用户管理"页替换为"账户"页（登录态/身份/被分配目录/切换账户/退出，
 并修复未选服务端时页签崩溃白屏）；分享随机密码提示六位字母+数字。
-服务端 0.5.0 起管理 API 仅在服务端管理端口可达——**客户端不做任何用户管理服务**，
+服务端管理 API 仅在服务端管理端口可达——**客户端不做任何用户管理服务**，
 roots 返回的虚拟根 id（`main:zhangsan` 形式）对客户端透明、原样透传即可。详见 CHANGELOG。

@@ -1,4 +1,4 @@
-// 传输任务共享类型（0.6.0 需求4/5/6）：transfer.ts 任务注册表与传输 UI 共用此契约。
+// 传输任务共享类型（需求4/5/6）：transfer.ts 任务注册表与传输 UI 共用此契约。
 // 状态字符串与 Rust "fm-transfer" 事件的 status 取值一致。
 export type TransferKind = "upload" | "download";
 

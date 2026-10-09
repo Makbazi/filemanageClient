@@ -340,7 +340,7 @@ pre,
   padding: 0 3px;
 }
 
-/* ---------- 快速切换"更多"下拉（0.6.0 需求10） ---------- */
+/* ---------- 快速切换"更多"下拉（需求10） ---------- */
 .qs-more-wrap {
   position: relative;
   display: inline-flex;
@@ -390,7 +390,7 @@ pre,
   white-space: nowrap;
 }
 
-/* ---------- 文件右键菜单（0.6.0 需求7） ---------- */
+/* ---------- 文件右键菜单（需求7） ---------- */
 .ctx-backdrop {
   position: fixed;
   inset: 0;
@@ -1598,7 +1598,7 @@ input[type="radio"] {
   word-break: break-all;
 }
 
-/* ---------- 可折叠侧栏（0.4.0，总结4：默认收成左缘小箭头标签） ---------- */
+/* ---------- 可折叠侧栏（默认收成左缘小箭头标签） ---------- */
 /* 0.1.4：折叠标签贴窗口左上角（原整列拉伸、箭头垂直居中，设置页下不易注意） */
 .sidebar-tab {
   width: 18px;
@@ -1632,7 +1632,7 @@ input[type="radio"] {
   transform: rotate(180deg);
 }
 
-/* 禁用态按钮（游客禁下载等，0.4.0） */
+/* 禁用态按钮（游客禁下载等） */
 .mini:disabled,
 .icon-btn:disabled {
   opacity: 0.35;
@@ -1643,7 +1643,7 @@ input[type="radio"] {
   color: var(--text-dim);
 }
 
-/* 网格卡片显式预览按钮（0.4.0，需求12：两种视图都有预览入口） */
+/* 网格卡片显式预览按钮（需求12：两种视图都有预览入口） */
 .grid-item {
   position: relative;
 }

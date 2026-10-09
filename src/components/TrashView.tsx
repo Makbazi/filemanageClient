@@ -6,7 +6,7 @@ interface Props {
   items: TrashItem[];
   loading: boolean;
   error: string;
-  /** 本地模式（自动清理策略本机独立，0.4.0） */
+  /** 本地模式（自动清理策略本机独立） */
   isLocal: boolean;
   /** 本地回收站保留天数 */
   retentionDays: number;

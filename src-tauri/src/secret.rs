@@ -1,7 +1,7 @@
-//! 服务端令牌与"记住的登录密码"的系统凭证库存储（0.4.0 安全升级）：
+//! 服务端令牌与"记住的登录密码"的系统凭证库存储：
 //! Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service（keyring crate）。
 //! 令牌：凭证库不可用时回退 config.json 明文并打日志提示；
-//! 密码（0.6.0 需求3）：仅在凭证库可用时支持保存（键 {serverId}/{username}/password，
+//! 密码（需求3）：仅在凭证库可用时支持保存（键 {serverId}/{username}/password，
 //! 按 服务端+账户 维度隔离），绝不落盘 config.json。
 
 use keyring::Entry;
@@ -53,7 +53,7 @@ pub fn remove(server_id: &str) {
     let _ = set_tokens(server_id, None, None);
 }
 
-// ---------- 记住的登录密码（0.6.0 需求3：键含 username，服务端+账户 维度隔离） ----------
+// ---------- 记住的登录密码（需求3：键含 username，服务端+账户 维度隔离） ----------
 
 fn entry2(server_id: &str, username: &str, kind: &str) -> Result<Entry, String> {
     Entry::new(SERVICE, &format!("{server_id}/{username}/{kind}")).map_err(|e| e.to_string())
