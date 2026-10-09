@@ -62,7 +62,7 @@ interface PromptLoginProps {
 }
 
 /**
- * 登录框（0.6.0 需求3）：可按"服务端+账户"维度记住密码（本体存系统凭证库）；
+ * 登录框（需求3）：可按"服务端+账户"维度记住密码（本体存系统凭证库）；
  * 已记住的账户出现在下拉中，选中自动回填密码；取消勾选记住=清除该账户凭证。
  * 需求11/12：管理员身份由服务端在用户端口拒绝登录（403），错误原文显示于此。
  */
@@ -172,7 +172,7 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const [groupByKind, setGroupByKind] = useState(false);
-  // 左侧导航折叠态（0.4.0，总结4：默认折叠为小箭头标签）
+  // 左侧导航折叠态（默认折叠为小箭头标签）
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const restored = useRef(false);
   // 已自动弹过登录框的服务端 id：后台加载遇 401 只对同一服务端弹一次，
@@ -500,7 +500,7 @@ export default function App() {
   }
 
   /**
-   * 上传/导入（需求3 覆盖冲突保护）。服务端模式 0.6.0 起入队执行：
+   * 上传/导入（需求3 覆盖冲突保护）。服务端模式入队执行：
    * 传输面板可暂停→断点续传、失败重试；覆盖任务的 BaseHash 由任务执行时
    * 重新 stat 取得（并发状态最新）。本地模式保持即时导入。
    */
@@ -1179,7 +1179,7 @@ export default function App() {
             applyTheme(c.ui.theme);
             const rs = await api.fetchRoots(dialog.serverId).catch(() => [] as ServerRoot[]);
             setRoots(rs);
-            // 登录成功后回到账户页（0.6.1）：从设置打开的登录框不再落回主界面
+            // 登录成功后回到账户页：从设置打开的登录框不再落回主界面
             const back = dialog.from === "settings";
             setDialog({ kind: "none" });
             if (back) openSettings("account");

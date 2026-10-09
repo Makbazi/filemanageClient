@@ -1,4 +1,4 @@
-// 顶栏：视图标题 + 快速切换（0.6.0 需求10：本地 + 选中远程两按钮，其余收进"更多"）+ 登录状态。
+// 顶栏：视图标题 + 快速切换（需求10：本地 + 选中远程两按钮，其余收进"更多"）+ 登录状态。
 import { useState } from "react";
 import type { AppConfig } from "../lib/types";
 import type { View } from "./Sidebar";

@@ -136,7 +136,7 @@ export async function serverLogin(serverId: string, username: string, password: 
   return r;
 }
 
-// ---------- 记住的账户密码（0.6.0 需求3） ----------
+// ---------- 记住的账户密码（需求3） ----------
 
 /** 取回某服务端某账户已记住的密码（未记住/无凭证库时 null）。 */
 export function credTake(serverId: string, username: string): Promise<string | null> {

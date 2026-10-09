@@ -579,7 +579,7 @@ pub async fn fs_preview(app: AppHandle, root_id: String, path: String) -> Result
     ))
 }
 
-/// 本地回收站过期自动清理（0.4.0；启动时执行，需求：默认保留 30 天，独立于服务端策略）。
+/// 本地回收站过期自动清理（启动时执行，需求：默认保留 30 天，独立于服务端策略）。
 /// 过期条目连同暂存实体一并彻底删除；保留天数取 AppConfig.trashRetentionDays（<=0 视为 30）。
 pub fn purge_expired_trash(st: &AppState) {
     let days = st.config().trash_retention_days.max(1);

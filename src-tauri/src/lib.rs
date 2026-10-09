@@ -86,7 +86,7 @@ fn get_config(app: AppHandle) -> AppConfig {
     config::state(&app).config()
 }
 
-/// 前端保存配置。0.6.0（需求1/8）：**服务端令牌与已记住账户索引是 Rust 侧
+/// 前端保存配置。需求1/8：**服务端令牌与已记住账户索引是 Rust 侧
 /// 独占的权威状态**（srv_login/try_refresh/srv_logout/cred_forget 维护，事件
 /// fm-config-changed 广播同步）；本命令忽略前端快照携带的 token/refreshToken/
 /// credentials——否则前端 800ms 防抖保存会把已轮换作废的旧令牌写回内存与
@@ -128,7 +128,7 @@ pub fn run() {
             std::fs::create_dir_all(&dir).ok();
             std::fs::create_dir_all(&cache).ok();
             let st = std::sync::Arc::new(config::AppState::load(dir, cache)?);
-            // 本地回收站过期自动清理（0.4.0，需求：30 天，与服务端各自独立；启动时执行一次）
+            // 本地回收站过期自动清理（需求：30 天，与服务端各自独立；启动时执行一次）
             localfs::purge_expired_trash(&st);
             // 0.3.2：上传账本清理（终态超 7 天的组/条目回收）+ 媒体缓存计数初始化
             // 与一次配额淘汰（上次退出遗留的孤儿 .part/.raw-src 也在此回收）
@@ -222,7 +222,7 @@ pub fn run() {
             // ffmpeg 转码播放（0.3.3 需求3：ffmpeg 档位 + 设置页探测；不内嵌 ffmpeg）
             player::ffmpeg_probe,
             player::ffmpeg_playable,
-            // 记住的服务端账户密码（0.6.0 需求3）
+            // 记住的服务端账户密码（需求3）
             serverapi::cred_take,
             serverapi::cred_forget,
             // 本地 AI

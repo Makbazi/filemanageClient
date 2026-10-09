@@ -5,7 +5,7 @@ FileManage 桌面客户端（Tauri 2 + React 19 + TypeScript）：
 分片上传/断点续传/实时进度、本地目录整树上传到远程（0.2.0 需求41）、图片/视频/音频/文档预览、高级搜索、多主题、
 列表/缩略图双视图、筛选与分类分组、临时分享链接、目录权限、文件版本回滚。
 
-当前版本：**0.2.0**（package.json / Cargo.toml / tauri.conf.json 三处同步）；配套 Server 0.2.x（推荐；0.1.x/0.7.x/0.6.x 亦可用，目录上传自动退化逐个 mkdir）
+当前版本：**0.3.4**（package.json / Cargo.toml / tauri.conf.json 三处同步）；配套 Server 0.2.x（推荐，当前 0.2.3）/ 0.1.x——认证为服务端认证图签发的**不透明随机凭证**（0.2.3 起不再使用 JWT，token/refreshToken 同串），旧服务端（<0.2.0）目录上传自动退化逐个 mkdir
 
 ## 快速开始（Get Start）
 

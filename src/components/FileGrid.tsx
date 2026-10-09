@@ -19,7 +19,7 @@ interface Props {
   onOpen(e: FsEntry): void;
   /** 角标眼睛按钮=预览弹窗 */
   onPreview(e: FsEntry): void;
-  /** 右键菜单（0.6.0 需求7），未提供则保持浏览器默认行为 */
+  /** 右键菜单（需求7），未提供则保持浏览器默认行为 */
   onCtx?(e: FsEntry, x: number, y: number): void;
 }
 

@@ -1,6 +1,7 @@
 //! 与 filemanageServer 交互：
-//! - 认证：短期 access token + refresh token 自动续期（需求22：3 周滑动会话）
-//! - 泛化 API 代理 srv_call（401 → 自动 refresh → 重试 → 仍失败才报 AUTH_REQUIRED）
+//! - 认证：服务端三层认证图签发的不透明随机凭证（64-hex，不编码身份；refreshToken
+//!   为同一凭证的兼容别名），需求22 的 3 周滑动会话语义保留——活跃使用自动滑动
+//! - 泛化 API 代理 srv_call（401 → 自动轮换凭证 → 重试 → 仍失败才报 AUTH_REQUIRED）
 //! - 分片上传/断点续传/进度事件/取消/限速（需求3、18）
 //! - 流式下载 + .part 断点续传（Range）+ 进度事件
 //! - TLS：https 直连；服务端为自签证书时可按配置跳过校验（insecureTls）
@@ -35,7 +36,7 @@ pub struct TransferEvent {
     pub message: String,
 }
 
-/// 传输停止信号：0=无，1=取消，2=暂停（0.6.0 需求4/5：暂停保留进度可续传）。
+/// 传输停止信号：0=无，1=取消，2=暂停（需求4/5：暂停保留进度可续传）。
 pub const SIG_NONE: u8 = 0;
 pub const SIG_CANCEL: u8 = 1;
 pub const SIG_PAUSE: u8 = 2;
@@ -56,7 +57,7 @@ fn unregister_cancel(id: &str) {
 }
 
 /// 停止一个进行中的传输：pause=false 取消（丢弃本次调用，.part/会话仍保留可重跑），
-/// pause=true 暂停（0.6.0 需求4/5）。
+/// pause=true 暂停（需求4/5）。
 #[tauri::command]
 pub fn transfer_cancel(transfer_id: String, pause: Option<bool>) -> Result<(), String> {
     if let Some(f) = cancels().lock().unwrap().get(&transfer_id) {
@@ -69,7 +70,7 @@ fn emit(app: &AppHandle, ev: TransferEvent) {
     let _ = app.emit("fm-transfer", ev);
 }
 
-/// 叠加 TLS 选项（0.4.0 安全升级）：
+/// 叠加 TLS 选项：
 ///  - caFile：仅信任指定 CA（推荐的自签场景做法，等效证书固定）；
 ///  - insecureTls：全盘跳过校验（兼容旧配置，前端已提示风险）。
 fn apply_tls(srv: &ServerConf, b: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, String> {
@@ -168,8 +169,8 @@ async fn pace(limit_kbps: u32, bytes: u64, elapsed: Duration) {
 
 // ---------- 认证 ----------
 
-/// 登录：保存 access token 与 refresh token（旧版服务端无 refreshToken 也兼容）。
-/// remember=Some(true)：登录成功后把密码记入系统凭证库（0.6.0 需求3，按 服务端+账户 隔离）；
+/// 登录：保存服务端签发的随机凭证（token/refreshToken 同值；服务端未返回 refreshToken 时仅存主凭证）。
+/// remember=Some(true)：登录成功后把密码记入系统凭证库（需求3，按 服务端+账户 隔离）；
 /// Some(false)：清除该账户已记住的密码；None：保持现状。凭证库不可用时静默跳过。
 #[tauri::command]
 pub async fn srv_login(
@@ -376,7 +377,7 @@ pub async fn srv_logout(app: AppHandle, server_id: String) -> Result<(), String>
     Ok(())
 }
 
-// ---------- 记住的账户密码管理（0.6.0 需求3） ----------
+// ---------- 记住的账户密码管理（需求3） ----------
 
 /// 取回某服务端某账户已记住的密码（快速登录用；未记住返回 null）。
 #[tauri::command]
