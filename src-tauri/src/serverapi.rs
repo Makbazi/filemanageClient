@@ -1129,6 +1129,49 @@ fn srv_media_key(server_id: &str, root_id: &str, path: &str, ver: Option<&str>) 
     }
 }
 
+/// 0.3.5 需求5：同缓存键 ensure 的 per-key single-flight。
+/// 根因：dest.exists() 是 check-then-act——两路并发（React StrictMode 双 effect、
+/// FileViewer+PreviewModal 同键、旧管线缩略图与查看并发）双双穿过检查后共用同一个
+/// `<dest>.part`：先完成者 rename 走掉，后者 append/rename 撞 ENOENT——即用户所见
+/// "第一次查看概率报文件不存在、第二次就好"（第二次 exists 短路）。RAW 的
+/// `.raw-src` scratch 同型竞态（先完成者删 scratch，后者 fs::read ENOENT）。
+/// 修法：按 key_hash 取进程内共享 Mutex，锁内二次 check exists 短路——后进者
+/// 等待先驱完成并直接复用成品，绝不重复下载。表项在最后使用者析构时回收（计数
+/// 恰为"map 一份 + 自己一份"才摘除；摘除后发现仍有等待者则放回，保证 map 为唯一
+/// 入口不变量）。锁只护同一文件，跨文件并发不受影响。std Mutex 只护表本身
+/// （无 await 持锁），下载用 tokio::sync::Mutex。
+static MEDIA_FLIGHT: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn media_flight(key_hash: u64) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let map = MEDIA_FLIGHT.get_or_init(Default::default);
+    let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+    m.entry(key_hash)
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn media_flight_release(key_hash: u64, lk: &std::sync::Arc<tokio::sync::Mutex<()>>) {
+    // lk 自身持一份 + map 一份 = 2 时无任何等待者，可安全摘除
+    if std::sync::Arc::strong_count(lk) != 2 {
+        return;
+    }
+    let map = MEDIA_FLIGHT.get_or_init(Default::default);
+    let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+    match m.get(&key_hash) {
+        Some(cur) if std::sync::Arc::ptr_eq(cur, lk) => {
+            if let Some(old) = m.remove(&key_hash) {
+                // 摘除瞬间恰有新人 clone（计数又 >2 等待中）→ 放回，维持入口唯一
+                if std::sync::Arc::strong_count(&old) > 2 {
+                    m.insert(key_hash, old);
+                }
+            }
+        }
+        _ => {} // 已被他人摘走/换新建条目——无事可做
+    }
+}
+
 /// 把服务端文件确保纳入本地媒体缓存目录（asset 协议已授权），返回缓存路径。
 /// 供 <img>/<video>/<audio>/<embed> 直接加载（asset 协议支持 Range）。
 /// 0.1.7：可选 ver（前端传 entry.mtime 串）并入缓存键，防覆盖后 exists 命中旧内容。
@@ -1157,52 +1200,66 @@ pub(crate) async fn srv_media_ensure(
         crate::cachemgr::touch(&dest); // 命中=访问（0.3.2 LRU；hard_link 条目跳过）
         return Ok(dest);
     }
-    let url = format!("{}/api/v1/preview", base_of(&srv));
-    let limit = st.config().transfer.download_limit_kbps;
-    let name = path.rsplit('/').next().unwrap_or("media").to_string();
-    let flag = Arc::new(AtomicU8::new(SIG_NONE));
-    if !raw {
-        let dest_s = dest.to_string_lossy().to_string();
-        download_inner(
-            app,
-            server_id,
-            &url,
-            &[("rootId", root_id), ("path", path)],
-            &dest_s,
-            &format!("media-{key_hash:x}"),
-            &name,
-            limit,
-            &flag,
-            true, // 0.3.3 需求1：查看/预览取字节=本地缓存行为，绝不产生传输行
-        )
-        .await?;
+    // 0.3.5 需求5：per-key single-flight——锁内二次 check，杜绝同键并发共用
+    // .part/.raw-src 的 ENOENT 竞态（见 media_flight 注释）。
+    let lk = media_flight(key_hash);
+    let flight = lk.lock().await;
+    let r = async {
+        if dest.exists() {
+            crate::cachemgr::touch(&dest);
+            return Ok(dest);
+        }
+        let url = format!("{}/api/v1/preview", base_of(&srv));
+        let limit = st.config().transfer.download_limit_kbps;
+        let name = path.rsplit('/').next().unwrap_or("media").to_string();
+        let flag = Arc::new(AtomicU8::new(SIG_NONE));
+        if !raw {
+            let dest_s = dest.to_string_lossy().to_string();
+            download_inner(
+                app,
+                server_id,
+                &url,
+                &[("rootId", root_id), ("path", path)],
+                &dest_s,
+                &format!("media-{key_hash:x}"),
+                &name,
+                limit,
+                &flag,
+                true, // 0.3.3 需求1：查看/预览取字节=本地缓存行为，绝不产生传输行
+            )
+            .await?;
+            note_media_write(&st, &dest);
+            return Ok(dest);
+        }
+        // RAW：原始字节下到 scratch（可续传），提取预览后 scratch 删除不双占空间
+        let scratch = st.media_cache_dir().join(format!("{key_hash:x}.raw-src"));
+        if !scratch.exists() {
+            download_inner(
+                app,
+                server_id,
+                &url,
+                &[("rootId", root_id), ("path", path)],
+                &scratch.to_string_lossy(),
+                &format!("media-{key_hash:x}"),
+                &name,
+                limit,
+                &flag,
+                true,
+            )
+            .await?;
+        }
+        let data = fs::read(&scratch).map_err(|e| e.to_string())?;
+        let jpeg = crate::thumb::extract_preview(&data)
+            .ok_or("该 RAW 未找到完整内嵌 JPEG 预览，请下载后用 RAW 软件查看")?;
+        fs::write(&dest, &jpeg).map_err(|e| e.to_string())?;
+        let _ = fs::remove_file(&scratch);
         note_media_write(&st, &dest);
-        return Ok(dest);
+        Ok(dest)
     }
-    // RAW：原始字节下到 scratch（可续传），提取预览后 scratch 删除不双占空间
-    let scratch = st.media_cache_dir().join(format!("{key_hash:x}.raw-src"));
-    if !scratch.exists() {
-        download_inner(
-            app,
-            server_id,
-            &url,
-            &[("rootId", root_id), ("path", path)],
-            &scratch.to_string_lossy(),
-            &format!("media-{key_hash:x}"),
-            &name,
-            limit,
-            &flag,
-            true,
-        )
-        .await?;
-    }
-    let data = fs::read(&scratch).map_err(|e| e.to_string())?;
-    let jpeg = crate::thumb::extract_preview(&data)
-        .ok_or("该 RAW 未找到完整内嵌 JPEG 预览，请下载后用 RAW 软件查看")?;
-    fs::write(&dest, &jpeg).map_err(|e| e.to_string())?;
-    let _ = fs::remove_file(&scratch);
-    note_media_write(&st, &dest);
-    Ok(dest)
+    .await;
+    drop(flight);
+    media_flight_release(key_hash, &lk);
+    r
 }
 
 /// 媒体缓存新落盘条目：登记字节数并触发超限淘汰（0.3.2 磁盘 ≤10GB LRU；
@@ -1310,18 +1367,41 @@ pub async fn srv_thumb(
     match fetch_server_thumb(&app, &server_id, &root_id, &path).await {
         ServerThumb::Bytes(b) => {
             let _ = std::fs::create_dir_all(st.media_cache_dir());
-            let tmp = st.media_cache_dir().join(format!("{:x}.thumb.jpg.tmp", key_hash));
+            // 0.3.5：tmp 名含随机尾段——同键并发（目录切换复位后旧 future 仍在途）
+            // 不再互踩（Linux 静默交叉写坏图永久落缓存 / Windows rename 目标存在报错）。
+            // 仍匹配 cachemgr `.thumb.jpg.tmp` 尾缀孤儿回收（24h）。
+            let tmp = st.media_cache_dir().join(format!(
+                "{:x}.{:x}.thumb.jpg.tmp",
+                key_hash,
+                uuid::Uuid::new_v4().as_u128()
+            ));
             std::fs::write(&tmp, &b).map_err(|e| e.to_string())?;
-            std::fs::rename(&tmp, &thumb).map_err(|e| e.to_string())?;
+            if thumb.exists() {
+                let _ = std::fs::remove_file(&tmp); // 先驱已写好成品：复用
+                return Ok(Some(thumb.to_string_lossy().into_owned()));
+            }
+            if let Err(e) = std::fs::rename(&tmp, &thumb) {
+                if thumb.exists() {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Ok(Some(thumb.to_string_lossy().into_owned()));
+                }
+                return Err(e.to_string());
+            }
             crate::cachemgr::note_new_file(b.len() as u64);
             crate::cachemgr::maybe_enforce(&st);
             return Ok(Some(thumb.to_string_lossy().into_owned()));
         }
         ServerThumb::Permanent => return Ok(None),
         ServerThumb::Busy(msg) => return Err(msg),
-        ServerThumb::Legacy => {}
+        // 0.3.5 需求1（Windows 网格高像素图/NEF 落图标）：415=服务端生成上限
+        // （thumbMaxPixels 12MP/边长 6000px/不识别格式——为守服务端 ≤200MB 解码
+        // 内存峰值），并非"无图"。客户端 Rust image crate 解码能力强于 Go 标准库
+        // （高 MP JPEG/CMYK/RAW 内嵌预览均可缩）——落到下面的旧管线本地缩放
+        // （静默整文件入媒体缓存一次，此后 exists 秒回，仍受磁盘 LRU 管辖）。
+        // 413（>64MiB，整文件拉取过重）与 403（权限）维持永久无图不变。
+        ServerThumb::Unsupported | ServerThumb::Legacy => {}
     }
-    // 旧管线（仅 Server ≤0.2.0 无 /thumb）：整文件静默入媒体缓存后本地缩放
+    // 旧管线（Server ≤0.2.0 无 /thumb，或本批 415 语义回退）：整文件静默入媒体缓存后本地缩放
     let src = srv_media_ensure(&app, &server_id, &root_id, &path, ver.as_deref()).await?;
     match crate::thumb::ensure_thumb(&st, &key, &src) {
         Ok(t) => Ok(Some(t.to_string_lossy().into_owned())),
@@ -1341,8 +1421,11 @@ enum ServerThumb {
     Bytes(Vec<u8>),
     /// 端点不存在（旧服务端）→ 旧管线
     Legacy,
-    /// 服务端明确不可生成（413 过大/415 格式/403 权限）——永久无图，零下载零重试
+    /// 服务端明确拒绝出图（413 过大/403 权限）——永久无图，零下载零重试
     Permanent,
+    /// 415 服务端生成不了（像素闸门/格式不识别）≠ 无图：客户端本地缩放兜底
+    ///（0.3.5 需求1，见 srv_thumb 注释）
+    Unsupported,
     /// 瞬时失败（网络/429 重试耗尽/401/5xx）——前端退避重试
     Busy(String),
 }
@@ -1374,7 +1457,8 @@ async fn fetch_server_thumb(app: &AppHandle, server_id: &str, root_id: &str, pat
                 Err(e) => return ServerThumb::Busy(format!("缩略图流读取失败: {e}")),
             },
             404 => return ServerThumb::Legacy, // 旧服务端无此端点
-            413 | 415 | 403 => return ServerThumb::Permanent,
+            413 | 403 => return ServerThumb::Permanent,
+            415 => return ServerThumb::Unsupported, // 0.3.5：服务端出不了图≠无图，走本地缩放兜底
             429 => {
                 if attempt < 2 {
                     tokio::time::sleep(Duration::from_millis(2000 << attempt)).await;

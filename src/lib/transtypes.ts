@@ -51,4 +51,8 @@ export interface TransferTask {
   /** 0.3.2：组内子任务在上传账本中的 rel_path（组任务 id 即账本 gid；
    *  Rust srv_upload 据此回写 session_id/终态——重启后"继续未完成的上传组"）。 */
   journalRel?: string;
+  /** 0.3.5 需求3：右下角传输面板**仅此视图**隐藏该条（终态行"隐藏"按钮置位；
+   *  传输管理页 TransfersView 不受影响、任务注册表不删除）。任务重新进入
+   *  非终态（继续/重试）时由 run 清除，保证面板始终看得见"在动"的任务。 */
+  panelHidden?: boolean;
 }

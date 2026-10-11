@@ -16,20 +16,26 @@ Tauri 2 + React 19 + TS 桌面客户端。两种数据来源统一在 `DataSourc
 
 ```
 src/App.tsx            根组件：状态编排、对话框调度（Dialog 判别联合）、查看覆盖层
-                       （viewing 状态，0.1.7）、位置恢复
+                       （viewing 状态，0.1.7）、位置恢复；0.3.5 loginEpoch 计数并入
+                       列表 effect 依赖、fm-config-changed 时 +1（修复服务端重启后
+                       重新登录须手点刷新才出文件——登录路径保持同 rootId/path 时
+                       effect 依赖零翻动的死角；稳定原始值，不违反约定 4）
 src/lib/
   datasource.ts        DataSource 接口（唯一数据访问契约）
   local.ts             本地实现（invoke fs_* 命令）
-  server.ts            服务端实现（srv_call + srv_* 传输命令；0.2.0 serverMkdirs 批量建目录+旧服务端退化逐个 mkdir；0.3.2 serverCheck 目录重传预检（500/批，旧服务端 isMissingEndpoint 退化）；thumbPath 契约：null=永久无图、抛错=瞬时重试；0.3.3 收紧：413/415/403=永久 null（不整文件兜底不空转重试）、size_hint 移除、404 旧管线仅 Server ≤0.2.0 且静默）
+  server.ts            服务端实现（srv_call + srv_* 传输命令；0.2.0 serverMkdirs 批量建目录+旧服务端退化逐个 mkdir；0.3.2 serverCheck 目录重传预检（500/批，旧服务端 isMissingEndpoint 退化）；thumbPath 契约：null=永久无图、抛错=瞬时重试；0.3.3 收紧：413/415/403=永久 null（不整文件兜底不空转重试）、size_hint 移除、404 旧管线仅 Server ≤0.2.0 且静默；0.3.5 修订：415 不再判 null（服务端像素闸门≠无图）→Rust 落旧管线本地缩放，null 仅剩 413/403/真无图）
   api.ts               配置单例(loadConfig/saveConfig/active) + source() 工厂 + 分享/ACL/AI 辅助
   transfer.ts          任务注册表（入队/暂停/续传/重试 + "fm-transfer" 事件归并，
                        未入队 transferId 首个事件自动注册为展示任务）+ 订阅；
                        0.2.0 目录上传组任务（enqueueGroup 子任务不进 order/并发池 3/
                        组级 pause-resume-cancel-retry/rowActions 统一选路）；
                        0.3.2 FM_* 前缀错误路由、组终态落上传账本（syncGroupDb 去抖）、
-                       resumeJournalGroup/abandonJournalGroup/listJournalPending 重启续传 API
+                       resumeJournalGroup/abandonJournalGroup/listJournalPending 重启续传 API；
+                       0.3.5 dismissFromPanel(id)——仅右下角面板隐藏终态行（panelHidden 展示标记，
+                       注册表与 TransfersView 不动；run() 回到运行态自动清除）
   transtypes.ts        TransferTask/TransferStatus 共享契约（状态串 = Rust 事件；
-                       0.3.2 +skipped 组行跳过计数、+journalRel 账本 rel 坐标）
+                       0.3.2 +skipped 组行跳过计数、+journalRel 账本 rel 坐标；
+                       0.3.5 +panelHidden 右下角面板逐条隐藏标记（纯展示，不删任务））
   thumbcache.ts        0.3.2 缩略图内存 LRU（≤cfg.cache.maxMemMb=2GB 默认）：键=来源标识+
                        path@mtime，media_read_bytes IPC 字节→Blob→objectURL，超限按访问序
                        revoke；预算由 api.loadConfig/saveConfig 同步 setThumbBudgetMb
@@ -60,7 +66,9 @@ src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView Tra
                        面板 + openMedia 外部播放入口，FileViewer 增 decoder prop）
                        （0.3.2：FileView/FileGrid 缩略图 IntersectionObserver 视口调度——
                        可见±2 屏全量出图（废除前 60 上限）、path@mtime+来源键、失败退避重试、
-                       thumbcache blob 上屏；Modals 新 UploadDiffDialog（目录重传同名不同内容
+                       thumbcache blob 上屏；0.3.5 调度改造：两遍扫描视口优先（滚到哪先出哪）+
+                       >16MiB 慢通道并发 ≤1（旧管线整文件兜底不再饿死快图）+ 瞬时 3 轮耗尽
+                       不判永久、单元格再入视口重武装重入队（每 key ≤3 批）+ queuedRef O(1)）；Modals 新 UploadDiffDialog（目录重传同名不同内容
                        逐行覆盖/跳过+全选按钮）；App.uploadDirToServers 预检管线（/check 两遍
                        +fs_file_hashes+弹窗询问+账本 lg_* 登记，旧服务端自动退化）；
                        TransfersView 顶部"未完成的上传组 [继续][放弃]"（lg_list_pending，
@@ -72,7 +80,9 @@ src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView Tra
                        ffmpeg 不可用面板报"配置路径"提示+外部播放器兜底保留；弹窗一律不自动外起/不自动
                        转码只给按钮；Settings→外观 视频三档 radio + ffmpeg 路径输入（Enter/失焦 uiSet）+
                        [探测 ffmpeg]；TransferPanel 显隐开关——头部 [隐藏]↔右下角 .transfer-fab 悬浮圆钮
-                       （IconTransfer+任务数角标，同层 z=150），纯展示态不影响队列）
+                       （IconTransfer+任务数角标，同层 z=150），纯展示态不影响队列；
+                       0.3.5 面板终态行（完成/已取消/失败）逐条"从面板隐藏"按钮=
+                       panelHidden 标记（仅移出右下角，TransfersView 保留；再运行自动回面板））
 src/styles/            base.css（组件）+ themes.css（5 套主题变量）
 src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/player/cachemgr 的 command 注册 +
                        启动清理；0.3.0：TrayIconBuilder 托盘（菜单=显示主窗口/退出，左键仅唤醒——
@@ -104,7 +114,7 @@ src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/p
                                   fs_thumb(0.2.1 网格缩略图：媒体缓存 ≤512px .thumb.jpg 路径；0.3.3 契约对齐 srv_thumb：解不了且 >8MiB 由 Err 改 Ok(None) 永久图标) +
                                   fs_file_hashes(0.3.2 sha2 流式 SHA-256 批量哈希，目录重传预检 pass2 用，
                                   逐条容错 null=读失败))
-                       serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache(同 ver，0.2.1 同 RAW 分支；内部 srv_media_ensure)/preview_data + srv_thumb(0.2.1 改版：加 ver、返回缩略图路径；0.3.2 优先服务端 GET /thumb——浏览零下载，0.3.3 契约收紧 Result<Option>：413/415/403=Ok(None) 永久无图、size_hint 移除、404 旧管线仅 ≤0.2.0 且静默) + download_inner 增 silent 参数——查看/预览/缩略图通道 silent=true 不发任何 fm-transfer 事件（需求：查看绝不出现传输行；手动上传下载恒 false）) + transfer_cancel；
+                       serverapi.rs(srv_login/logout/change_password/call/upload/download/media_cache(同 ver，0.2.1 同 RAW 分支；内部 srv_media_ensure——0.3.5 MEDIA_FLIGHT per-key single-flight：dest.exists() check-then-act 双并发共用 .part/.raw-src 撞 ENOENT="首看概率文件不存在"根因，锁内二次 check 复用成品；Cargo.toml tokio 增 "sync")/preview_data + srv_thumb(0.2.1 改版：加 ver、返回缩略图路径；0.3.2 优先服务端 GET /thumb——浏览零下载，0.3.3 契约收紧 Result<Option>：413/415/403=Ok(None) 永久无图、size_hint 移除、404 旧管线仅 ≤0.2.0 且静默；**0.3.5 修订：415=服务端像素闸门(12MP/6000px thumbdec.go)≠无图→Unsupported 落旧管线本地缩放兜底（高MP JPEG/CMYK/RAW 内嵌预览客户端可解——Windows 截图后段全图标主根因），413/403 仍永久；产物 tmp 加 uuid 尾段防同键并发互踩（Linux 坏图永久缓存/Windows rename 已存在报错）+ rename 前后 exists 复用**） + download_inner 增 silent 参数——查看/预览/缩略图通道 silent=true 不发任何 fm-transfer 事件（需求：查看绝不出现传输行；手动上传下载恒 false）) + transfer_cancel；
                                   0.3.2 断连大修：reqwest Client 按(地址|TLS|用途)缓存复用+
                                   tcp_keepalive30s/nodelay、put_chunk 网络类失败≤3 退避(1/2/4s)、
                                   会话创建后 chunkCount 校验不符 DELETE 重建、complete 移出 srv_call
@@ -253,6 +263,9 @@ cd src-tauri && cargo check
    落盘进缓存、纳入上限自动淘汰；用户手动下载仍走 srv_download 到用户目录）。
    ⑤FileView 调度契约：thumbPath 返回 null=永久无图（不重试）、抛错=瞬时失败（退避
    2/8/30s ≤3 轮后落图标）；游客立即图标（与 /preview 匿名语义一致）；目录切换全量复位。
+   **0.3.5 修订**：415 不再判 null（服务端像素闸门 12MP/6000px≠无图，落旧管线本地缩放
+   兜底；null 仅剩 413/403/真无图）；瞬时耗尽不永久 settle——再入视口重武装（每 key
+   ≤3 批）；调度=视口优先两遍扫描+慢通道（>16MiB）并发 ≤1。
 10. **版本号三处同步**（需求19），发版时更新 CHANGELOG 兼容矩阵（需求20）。
 11. 编译验证：`npm run build` + `cargo check` 通过即可（需求29，不写测试）；
     **不做 git 提交/分支/tag**（需求30）。
@@ -278,7 +291,7 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.3.4（认证协议配套批：服务端去 JWT 后的凭证透明承接，客户端代码零改动 + 文档/版本号定版）+ 0.3.3（查看零传输 + 缩略图契约收紧 + ffmpeg 可配转码 + 传输面板显隐）+ 0.3.2（上传中断兜底 + 缩略图全显与双层缓存 + 浏览零下载）+ 0.3.1（win10 交叉编译环境修复：镜像补装 appindicator 开发包——纯 build-env 变更，产物代码/数据协议零变更）+ 0.3.0（H.264/H.265 视频播放体系 + 系统托盘常驻）+ 0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.3）** / 0.1.x。
+0.3.5（缩略图与稳定性修复批：415→本地缩放兜底 + 视口优先调度/慢通道/重入视口重武装 + 同键 single-flight + 面板逐条隐藏 + 重登自动刷新）+ 0.3.4（认证协议配套批：服务端去 JWT 后的凭证透明承接，客户端代码零改动 + 文档/版本号定版）+ 0.3.3（查看零传输 + 缩略图契约收紧 + ffmpeg 可配转码 + 传输面板显隐）+ 0.3.2（上传中断兜底 + 缩略图全显与双层缓存 + 浏览零下载）+ 0.3.1（win10 交叉编译环境修复：镜像补装 appindicator 开发包——纯 build-env 变更，产物代码/数据协议零变更）+ 0.3.0（H.264/H.265 视频播放体系 + 系统托盘常驻）+ 0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.x（推荐；当前 0.2.3）** / 0.1.x。
 **0.3.4（2026-10-10 用户第三批清单第 3 条；配 Server 0.2.3，客户端代码零改动）**：服务端认证重构去 JWT——登录/刷新响应中的 `token` 变为服务端三层认证图签发的**不透明随机凭证**（64-hex 随机哈希形态，不编码任何身份；真实 user id/username 存服务端）。客户端本就对凭证无格式假设（不解析、只 bearer_auth 透传、keyring 存取），**全链路零改动**：`refreshToken` 字段为同一凭证的兼容别名（token/refreshToken 同串），401→`try_refresh`→重试、logout、change-password、分享 st、keyring 存取语义全部不变；`/auth/me` 回显 `{id,username,role}` 账户页照常。升级 Server 0.2.3 后的一次性影响=存量会话失效、重登一次（既有 AUTH_REQUIRED 登录框路径承接，无新增面）。本批变更：三处版本源 0.3.3→0.3.4、serverapi.rs/secret.rs/config.rs 认证注释按不透明凭证改写（行为零变更）、设置"关于"配套服务端文案 0.2.x（推荐，当前 0.2.3）·0.1.x 可用。兼容矩阵：0.3.4 配 Server ≤0.2.2 亦无感（协议字段形状未变，凭证内容对客户端始终不透明）。
 **0.3.3（2026-10-06 用户清单 1–5 条；数据协议零变更，缩略图 BMP 对齐依赖 Server 0.2.2）**：需求原句——查看服务端视频触发了下载，查看服务端文件不得触发传输、上传下载只许手动触发；服务端按缩略图预览也要滚动到哪里哪里显示、向上向下缓存和本地目录机制保持一致；可在设置界面配置 ffmpeg 用于视频解码播放、默认系统解码但允许用户配置；右下角上传下载弹窗可关闭、按按钮可再弹出（显隐）；版本 0.3.3/0.2.2。实施——`download_inner` silent 化（media-<hash> 通道零事件，本批主修"看视频出下载行"；查看允许临时落盘进缓存的既定边界不变）；`srv_thumb`/`fs_thumb` 契约收紧（413/415/403=永久无图 null、不整文件兜底、size_hint 移除；视口 IO±2 屏/双层缓存本就双模共用，配 0.2.2 后服务端网格出图能力=本地机制：滚到哪出到哪）；`ui.videoDecoder` 三档 system|ffmpeg|external + `ui.ffmpegPath` + 新命令 `ffmpeg_probe`/`ffmpeg_playable`（H.264 MP4 转码入媒体缓存复用、零传输事件、不内嵌 ffmpeg、失败按面板提示走外部播放器兜底）；TransferPanel 头部隐藏↔右下角 .transfer-fab 圆钮显隐（会话内展示态，队列执行不受影响）。Cargo.toml tokio 增 `process` 特性；CSP/capabilities/`/api/v1` 协议零改动。三处版本源 0.3.2→0.3.3。
 **0.3.2（2026-10-06 用户清单 1–6 条；依赖 Server 0.2.1 加性端点，配 ≤0.2.0 逐条退化）**：需求原句——上传目录中途断连要修；中断后重传同一目录要相同文件校验+兜底（未完成恢复/碎片清理）；缩略图可见±2屏缓存、内存≤2GB、磁盘≤10GB、有清理更新机制；图片再多也要全量显示；打开服务端文件/文件夹不得触发下载（查看允许临时落盘纳入上限淘汰——维护者确认；磁盘缓存跨退出保留）。断连主根因与修复：**complete 被 srv_call 120s 总超时掐断→服务端已成功客户端报失败→重试撞 409 风暴**——complete 独立提交（stream client+15min）且断连后只轮询 `GET /upload/session` 判 completed 绝不重发；分片网络级重试（1/2/4s 退避≤3）；reqwest Client 按服务端复用+tcp_keepalive；坏会话（size 变）DELETE 重建；**取消即时 DELETE 会话清 staging**；FM_* 前缀错误路由。**目录重传预检**：`POST /check` 两遍（先 size，unknown 集 `fs_file_hashes` 补 SHA-256 复查）→ 相同自动跳过、同名不同内容 `uploadDiff` 弹窗逐行覆盖/跳过（覆盖 baseHash ""，服务端覆盖前存版本）→ 旧服务端 404 整体退化为 0.2.0 冲突语义。**上传账本**（localdb user_version 2 upload_groups/upload_items）：Rust 回写会话/终态，TransfersView"未完成的上传组 [继续][放弃]"重启续传（done 跳过、failed 覆盖语义、放弃逐 session DELETE），终态组 7 天启动回收。**缩略图体系**：IntersectionObserver（root=.page，rootMargin 上下 2 屏）驱动无上限优先级队列（废除 slice(0,60)；失败退避 2/8/30s ≤3 轮；键=来源标识+path@mtime；目录切换复位）；`srv_thumb` 优先服务端 `/thumb`（**浏览零下载**）；内存 `thumbcache.ts` blob LRU（`media_read_bytes` IPC ArrayBuffer；CSP/capabilities 零改动）；磁盘 `cachemgr.rs` ≤10GB mtime-LRU（hard_link 条目纪律/24h 孤儿回收/300s 巡检/设置页用量+清空）。新增直接依赖 sha2（锁内 0.10.9 提升，零新下载）。三处版本源 0.3.1→0.3.2。

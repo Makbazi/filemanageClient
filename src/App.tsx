@@ -330,6 +330,13 @@ export default function App() {
   // 需求8/1：Rust 侧登录/登出/令牌轮换/凭证变更广播 fm-config-changed——
   // 前端同步配置单例 + React 状态 + 当前服务端 roots；左侧 badge 与右侧
   // 内容由此共用同一时刻快照（保存链已由 save_config 令牌合并保证不会反向覆盖）。
+  // 0.3.5 需求4：服务端重启→登录态失效→401 清空列表→重新登录。登录成功路径
+  // （onDone 保持同 rootId/同 path）不会翻动列表 effect 的任何依赖 → 必须手动
+  // 按一次刷新才出文件。加一个纯计数 loginEpoch：Rust 侧每次认证态变更广播
+  // fm-config-changed 时 +1，并入下方列表 effect 依赖（稳定原始值，不参与
+  // saveConfig 对象引用环路——约定 4 不违反）。登出/改密同样触发一次列表重取，
+  // 语义良性（refresh 自带 401→handleAuthFail 承接）。
+  const [loginEpoch, setLoginEpoch] = useState(0);
   useEffect(() => {
     let cancelled = false;
     const un = listen("fm-config-changed", async () => {
@@ -342,6 +349,7 @@ export default function App() {
         const rs = await api.fetchRoots(a.serverId).catch(() => [] as ServerRoot[]);
         if (!cancelled) setRoots(rs ?? []);
       }
+      setLoginEpoch((n) => n + 1); // 重新登录成功：强制重拉当前目录列表
     });
     return () => {
       cancelled = true;
@@ -353,7 +361,8 @@ export default function App() {
     if (!restored.current) return;
     if (view === "files") refresh();
     if (view === "trash") refreshTrash();
-  }, [view, path, activeSig, refresh, refreshTrash]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, path, activeSig, refresh, refreshTrash, loginEpoch]);
 
   // 记录当前位置（防抖持久化，需求21）
   useEffect(() => {
