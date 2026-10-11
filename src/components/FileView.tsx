@@ -102,7 +102,12 @@ export default function FileView(p: Props) {
   const pageRef = useRef<HTMLDivElement | null>(null);
   const ioRef = useRef<IntersectionObserver | null>(null);
   const queueRef = useRef<string[]>([]);
+  const queuedRef = useRef<Set<string>>(new Set()); // 队列成员 O(1) 去重（0.3.5）
+  const visibleRef = useRef<Set<string>>(new Set()); // 当前与视口±2屏相交的 tkey（0.3.5 优先级）
+  const failedRef = useRef<Set<string>>(new Set()); // 瞬时耗尽（可随再可见重武装），≠永久无图（0.3.5）
+  const rearmRef = useRef<Map<string, number>>(new Map()); // 每 key 重武装次数（≤3 防死循环）
   const runningRef = useRef(0);
+  const slowRef = useRef(0); // >16MiB 慢通道在途数（并发≤1，防整文件兜底饿死快图，0.3.5）
   const settledRef = useRef<Set<string>>(new Set());
   const attemptsRef = useRef<Map<string, number>>(new Map());
   const entriesRef = useRef<Map<string, FsEntry>>(new Map());
@@ -130,6 +135,11 @@ export default function FileView(p: Props) {
   useEffect(() => {
     setThumbs({});
     queueRef.current = [];
+    queuedRef.current = new Set();
+    visibleRef.current = new Set();
+    failedRef.current = new Set();
+    rearmRef.current = new Map();
+    // runningRef/slowRef 不重置：在途 future 结束时各自减一（重置会致负值放大并发）
     settledRef.current = new Set();
     attemptsRef.current = new Map();
     for (const t of timersRef.current) clearTimeout(t);
@@ -155,10 +165,46 @@ export default function FileView(p: Props) {
     setThumbs((prev) => ({ ...prev, [key]: v }));
   }
 
+  // 0.3.5 需求1/2：调度改造（Windows 后段全图标 / Linux 缩略图问题的根治）——
+  //  ① 视口优先：旧 FIFO 下滚动新进入的格子排在全部预取旧格之后，被大文件
+  //    整文件兜底通道饿死（池仅 3）。现在每次取任务优先取仍在视口(±2屏)内的
+  //    队首项，滚到哪先出哪。
+  //  ② 慢通道隔离：>16MiB 条目（415/≤0.2.0 整文件下载兜底候选）并发 ≤1，
+  //    不再占满快图槽位。
+  //  ③ 瞬时失败不再永久化：3 轮退避耗尽只落图标（failedRef），单元格再次
+  //    进入视口即重武装重入队（每 key ≤3 批，防真坏文件死循环）。
+  const SLOW_BYTES = 16 << 20;
   function dispatchThumbs() {
-    while (runningRef.current < 3 && queueRef.current.length > 0) {
-      const key = queueRef.current.shift()!;
-      if (settledRef.current.has(key)) continue;
+    while (runningRef.current < 3) {
+      const q = queueRef.current;
+      let idx = -1;
+      let slow = false;
+      let purged = false;
+      // 两遍扫描：先取仍在视口(±2屏)内的（滚到哪先出哪），再取预取区的（FIFO）
+      for (let pass = 0; pass < 2 && idx < 0; pass++) {
+        for (let i = 0; i < q.length; i++) {
+          const k = q[i];
+          if (settledRef.current.has(k)) {
+            q.splice(i, 1);
+            queuedRef.current.delete(k);
+            purged = true;
+            continue;
+          }
+          if (pass === 0 ? !visibleRef.current.has(k) : false) continue;
+          const e = entriesRef.current.get(k);
+          const isSlow = !!e && e.size > SLOW_BYTES;
+          if (isSlow && slowRef.current >= 1) continue; // 慢通道满：跳过取下一个可跑项
+          idx = i;
+          slow = isSlow;
+          break;
+        }
+      }
+      if (idx < 0) {
+        if (purged) continue; // 剔除了作废项，重扫队列
+        break; // 无可运行项（或队列空/仅慢项且慢道满）
+      }
+      const key = q.splice(idx, 1)[0];
+      queuedRef.current.delete(key);
       const e = entriesRef.current.get(key);
       if (!e) continue; // 条目已被移除（刷新后消失）：丢弃
       if (api.isAnonymous()) {
@@ -168,30 +214,37 @@ export default function FileView(p: Props) {
         continue;
       }
       runningRef.current++;
+      if (slow) slowRef.current++;
       void (async () => {
         try {
           const path = await api.source().thumbPath(e);
           if (!path) {
-            settleThumb(key, null); // Rust 明示无缩略图：图标回退，不重试
+            settleThumb(key, null); // Rust 明示无缩略图（413/403/真无图）：图标回退，不重试
             return;
           }
           const url = await thumbBlobUrl(key, path);
           settleThumb(key, url);
-        } catch (err) {
+        } catch {
           const n = (attemptsRef.current.get(key) ?? 0) + 1;
           attemptsRef.current.set(key, n);
           if (n <= 3) {
             const delay = [2000, 8000, 30000][n - 1];
             const h = window.setTimeout(() => {
-              if (!settledRef.current.has(key)) queueRef.current.push(key);
+              if (!settledRef.current.has(key) && !queuedRef.current.has(key)) {
+                queueRef.current.push(key);
+                queuedRef.current.add(key);
+              }
               dispatchThumbs();
             }, delay);
             timersRef.current.push(h);
           } else {
-            settleThumb(key, null); // 连续失败：本轮放弃，条目更新（mtime 变）可再来
+            // 瞬时耗尽：本轮落图标但不判永久——再次进入视口重武装（0.3.5）
+            failedRef.current.add(key);
+            setThumbs((prev) => ({ ...prev, [key]: null }));
           }
         } finally {
           runningRef.current--;
+          if (slow) slowRef.current--;
           dispatchThumbs();
         }
       })();
@@ -237,11 +290,28 @@ export default function FileView(p: Props) {
       ioRef.current = new IntersectionObserver(
         (es) => {
           for (const en of es) {
-            if (!en.isIntersecting) continue;
             const k = (en.target as HTMLElement).dataset.tkey;
-            if (k && !settledRef.current.has(k) && !queueRef.current.includes(k)) {
-              queueRef.current.push(k);
+            if (!k) continue;
+            if (!en.isIntersecting) {
+              visibleRef.current.delete(k);
+              continue;
             }
+            visibleRef.current.add(k);
+            if (settledRef.current.has(k) || queuedRef.current.has(k)) continue;
+            // 0.3.5：瞬时耗尽的格子再次进入视口 → 重武装重入队（每 key ≤3 批，
+            // 真坏/真慢文件也不会无限循环；永久无图 settled(null) 不重入）
+            if (failedRef.current.has(k)) {
+              const r = (rearmRef.current.get(k) ?? 0) + 1;
+              if (r > 3) {
+                settledRef.current.add(k);
+                continue;
+              }
+              rearmRef.current.set(k, r);
+              failedRef.current.delete(k);
+              attemptsRef.current.set(k, 0);
+            }
+            queueRef.current.push(k);
+            queuedRef.current.add(k);
           }
           dispatchThumbs();
         },

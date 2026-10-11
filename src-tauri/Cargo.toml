@@ -1,6 +1,6 @@
 [package]
 name = "filemanageclient"
-version = "0.3.4"
+version = "0.3.5"
 description = "FileManage 云盘式文件管理器客户端"
 authors = ["mon"]
 edition = "2021"
@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json"] }
 # 0.3.3 增 process：ffmpeg 转码通路（player.rs）以 tokio::process::Command 起子进程
-tokio = { version = "1", features = ["fs", "macros", "io-util", "time", "process"] }
+tokio = { version = "1", features = ["fs", "macros", "io-util", "time", "process", "sync"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"

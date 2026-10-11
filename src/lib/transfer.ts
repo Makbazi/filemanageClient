@@ -114,7 +114,9 @@ async function run(id: string) {
     patch(id, { status: "error", message: "未登录该服务端，请先登录后重试" });
     return;
   }
-  patch(id, { status: "running", message: "" });
+  // 0.3.5 需求3：任务重新进入运行态（继续/重试）即清除面板隐藏标记——
+  // 右下角面板必须能看见"在动"的任务；隐藏只针对终态行的展示。
+  patch(id, { status: "running", message: "", panelHidden: false });
   const source = new ServerSource(t.serverId, t.rootId, false);
   try {
     if (t.kind === "upload") {
@@ -186,6 +188,12 @@ export function overwriteRetry(id: string) {
   if (!t) return;
   patch(id, { overwrite: true });
   void run(id);
+}
+
+/** 0.3.5 需求3：仅从右下角传输面板隐藏该条（任务注册表与传输管理页不受影响；
+ *  removeTask 才是两视图同删的"从列表移除"）。再次执行（run）自动恢复显示。 */
+export function dismissFromPanel(id: string) {
+  patch(id, { panelHidden: true });
 }
 
 export function removeTask(id: string) {

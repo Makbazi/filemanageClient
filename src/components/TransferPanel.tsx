@@ -3,16 +3,19 @@
 // 0.2.0 需求41：目录上传聚合为一条组行（文件计数进度；动作经 rowActions 走组级 API）。
 // 0.3.3 需求4：右下角显隐开关——面板头部"隐藏"收起为悬浮圆钮（带任务数角标），
 // 再点圆钮重新弹出（纯前端展示态，不影响队列执行；本会话内记忆）。
+// 0.3.5 需求3：终态行（完成/已取消/失败）逐条"隐藏"按钮——仅把该条移出右下角
+// 面板（panelHidden 展示标记），传输管理页仍完整保留；任务重新运行自动回到面板。
 import { useEffect, useState } from "react";
-import { subscribe, rowActions, type TransferTask } from "../lib/transfer";
+import { subscribe, rowActions, dismissFromPanel, type TransferTask } from "../lib/transfer";
 import { STATUS_LABEL } from "../lib/transtypes";
 import { fmtSize } from "../lib/format";
 import { IconDownload, IconPause, IconPlay, IconRefresh, IconTransfer, IconUpload, IconX } from "./icons";
 
 export default function TransferPanel() {
-  const [items, setItems] = useState<TransferTask[]>([]);
+  const [all, setAll] = useState<TransferTask[]>([]);
   const [open, setOpen] = useState(true);
-  useEffect(() => subscribe(setItems), []);
+  useEffect(() => subscribe(setAll), []);
+  const items = all.filter((t) => !t.panelHidden); // 逐条隐藏只影响本面板
   if (items.length === 0) return null;
 
   if (!open) {
@@ -72,6 +75,11 @@ export default function TransferPanel() {
               )}
               {(t.status === "running" || t.status === "queued") && (
                 <button className="mini danger" title={t.isGroup ? "取消整组" : "取消"} onClick={() => void act.cancel()}>
+                  <IconX size={13} />
+                </button>
+              )}
+              {(t.status === "done" || t.status === "cancelled" || t.status === "error") && (
+                <button className="mini" title="从面板隐藏（传输管理页仍保留该记录）" onClick={() => dismissFromPanel(t.id)}>
                   <IconX size={13} />
                 </button>
               )}
