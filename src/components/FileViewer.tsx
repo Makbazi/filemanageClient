@@ -37,10 +37,58 @@ export default function FileViewer(p: Props) {
   const [ffmBusy, setFfmBusy] = useState(false);
   const [ffmErr, setFfmErr] = useState("");
   const autoOpened = useRef(""); // external 模式自动打开去重（含 StrictMode 双执行）
+  // 0.3.6 需求1（图片放大缩小查看）：查看器图片缩放——滚轮以**光标为锚**缩放
+  // （0.2x–16x）、放大后拖拽平移、头部 [－][比例][＋][适应]；双击图片关闭查看的
+  // 既定契约不变（挂在缩放上，关闭行为同前）。zRef 镜像当前 (z,x,y) 供事件回调
+  // 即时读取（原生 wheel 监听跨渲染周期，直接读 state 会拿旧值）。
+  const [zoom, setZoom] = useState(1);
+  const [zOff, setZOff] = useState({ x: 0, y: 0 });
+  const zRef = useRef({ z: 1, x: 0, y: 0 });
+  const zoomBoxRef = useRef<HTMLDivElement | null>(null);
+  const zDrag = useRef<null | { sx: number; sy: number; ox: number; oy: number }>(null);
+
+  const zApply = (nz: number, px: number, py: number) => {
+    const cur = zRef.current;
+    const z = Math.min(16, Math.max(0.2, nz));
+    const k = z / cur.z;
+    const x = k === 1 ? cur.x : px - (px - cur.x) * k;
+    const y = k === 1 ? cur.y : py - (py - cur.y) * k;
+    if (k === 1 && x === cur.x && y === cur.y) return;
+    zRef.current = { z, x, y };
+    setZoom(z);
+    setZOff({ x, y });
+  };
+  const zReset = () => {
+    zRef.current = { z: 1, x: 0, y: 0 };
+    setZoom(1);
+    setZOff({ x: 0, y: 0 });
+  };
+
+  // 换文件/重载 → 复位缩放
+  useEffect(() => {
+    zReset();
+  }, [url]);
   // 仅记录"本查看器置过的"全屏：退出时只撤销自己开启的，绝不抢 WM 自设状态
   const fsApplied = useRef(false);
   const e = p.entry;
   const type = viewableType(e) ?? "image";
+
+  // 原生 wheel（passive:false 才能 preventDefault——React onWheel 在文档根为
+  // passive，滚动会穿透到 viewer-body）；0.3.6 需求1 图片缩放
+  useEffect(() => {
+    const el = zoomBoxRef.current;
+    if (!el || type !== "image" || !url || err) return;
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault();
+      const r = el.getBoundingClientRect();
+      const px = ev.clientX - (r.left + r.width / 2);
+      const py = ev.clientY - (r.top + r.height / 2);
+      zApply(zRef.current.z * Math.exp(-ev.deltaY * 0.0018), px, py);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type, url, err]);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +124,34 @@ export default function FileViewer(p: Props) {
                 if (!cancelled) setFfmBusy(false);
               }
               return;
+            }
+            // 0.3.6 需求1（修"H.265 依旧无法播放"）：system 档编码探测编排——
+            // `ffmpeg -i` 窥真实编码（毫秒级）；HEVC 命中则**不再让 <video> 撞一次
+            // 必然失败的系统解码**：ffmpeg 可用→自动转码窗口内播放（复用转圈 UI）；
+            // 转码失败（含 ffmpeg 未配置）→ 直落 ffmErr 引导面板。判不了（ffmpeg
+            // 缺失探测为空）/非 HEVC → 维持系统直试原行为。
+            if (type === "video" && p.decoder === "system") {
+              let hevc = false;
+              try {
+                const codec = await api.videoCodecProbe(path);
+                hevc = codec === "hevc" || codec === "hvc1" || codec === "hev1";
+              } catch {
+                hevc = false; // 探测不可用（含 ffmpeg 缺失）→ 走系统直试
+              }
+              if (cancelled) return;
+              if (hevc) {
+                setBusy(false);
+                setFfmBusy(true);
+                try {
+                  const playable = await api.ffmpegPlayable(path, true);
+                  if (!cancelled) setUrl(convertFileSrc(playable));
+                } catch (ex) {
+                  if (!cancelled) setFfmErr(String(ex));
+                } finally {
+                  if (!cancelled) setFfmBusy(false);
+                }
+                return;
+              }
             }
             setUrl(convertFileSrc(path));
           }
@@ -164,6 +240,21 @@ export default function FileViewer(p: Props) {
         <span className="viewer-name" title={e.name}>{e.name}</span>
         <span className="dim">{fmtSize(e.size)}</span>
         <div className="spacer" />
+        {/* 0.3.6 需求1：图片缩放工具条（滚轮=光标为锚缩放，放大后可拖拽平移） */}
+        {!busy && !err && type === "image" && (
+          <>
+            <button className="icon-btn" title="缩小" disabled={zoom <= 0.2} onClick={() => zApply(zoom / 1.25, 0, 0)}>
+              −
+            </button>
+            <span className="dim zlabel-zoom">{Math.round(zoom * 100)}%</span>
+            <button className="icon-btn" title="放大" disabled={zoom >= 16} onClick={() => zApply(zoom * 1.25, 0, 0)}>
+              ＋
+            </button>
+            <button className="icon-btn" title="适应窗口" disabled={zoom === 1 && zOff.x === 0 && zOff.y === 0} onClick={zReset}>
+              适应
+            </button>
+          </>
+        )}
         <button
           className="icon-btn"
           title={anonymous ? "游客模式需登录才能下载" : "下载到本机"}
@@ -187,14 +278,36 @@ export default function FileViewer(p: Props) {
         )}
         {err && <div className="error-bar">{err}</div>}
         {!busy && !err && type === "image" && (
-          <img
-            className="viewer-img"
-            src={url}
-            alt={e.name}
-            draggable={false}
+          <div
+            ref={zoomBoxRef}
+            className="viewer-zoombox"
+            style={{ cursor: zoom > 1.01 ? (zDrag.current ? "grabbing" : "grab") : undefined }}
             onDoubleClick={exit}
-            onError={() => setErr("图片解码失败（格式可能不受支持），可下载后用本机看图工具打开")}
-          />
+            onPointerDown={(ev) => {
+              if (ev.button !== 0 || zoom <= 1.01) return;
+              zDrag.current = { sx: ev.clientX, sy: ev.clientY, ox: zRef.current.x, oy: zRef.current.y };
+              ev.currentTarget.setPointerCapture(ev.pointerId);
+            }}
+            onPointerMove={(ev) => {
+              const d = zDrag.current;
+              if (!d) return;
+              const x = d.ox + (ev.clientX - d.sx);
+              const y = d.oy + (ev.clientY - d.sy);
+              zRef.current = { z: zRef.current.z, x, y };
+              setZOff({ x, y });
+            }}
+            onPointerUp={() => { zDrag.current = null; }}
+            onPointerCancel={() => { zDrag.current = null; }}
+          >
+            <img
+              className="viewer-img"
+              src={url}
+              alt={e.name}
+              draggable={false}
+              style={{ transform: `translate(${zOff.x}px, ${zOff.y}px) scale(${zoom})` }}
+              onError={() => setErr("图片解码失败（格式可能不受支持），可下载后用本机看图工具打开")}
+            />
+          </div>
         )}
         {/* 0.3.0 需求1 + 0.3.3 需求3：视频分段——外部播放面板（已按设置外起，可重开/
             回窗口内）、ffmpeg 转码中、ffmpeg 不可用/失败面板（外部播放器兜底+重试）、

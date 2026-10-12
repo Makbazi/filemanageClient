@@ -32,8 +32,8 @@ export interface ServerConf {
   name: string;
   baseUrl: string;
   username?: string | null;
+  /** 登录凭证（0.2.4 单凭证：活跃滑动续期服务端无感完成，串不变） */
   token?: string | null;
-  refreshToken?: string | null;
   /** 信任自签证书（服务端 TLS 自签时开启；不推荐，会跳过全部证书校验） */
   insecureTls?: boolean;
   /** 指定 CA 证书文件（PEM）；自签场景推荐，等效证书固定 */
@@ -112,6 +112,8 @@ export interface AppConfig {
   credentials: CredRef[];
   /** 媒体/缩略图缓存配额（0.3.2，需求3/4/5） */
   cache: CacheConf;
+  /** 客户端唯一标识（0.3.6 认证契约；Rust 侧权威生成/维护，前端只透传） */
+  clientId?: string;
 }
 
 /** 媒体/缩略图缓存配额（0.3.2）：磁盘上限由 Rust LRU 执行、内存上限由前端

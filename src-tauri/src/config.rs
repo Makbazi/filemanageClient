@@ -18,7 +18,9 @@ pub struct RootConf {
 }
 
 /// 已配置的服务端（可配置多个）。
-/// token 为短期访问令牌；refresh_token 用于自动续期（需求22：3 周滑动会话）。
+/// token = 单一无透明随机凭证（0.2.4 认证契约：活跃滑动续期由服务端无感完成、
+/// 凭证串不变；闲置超 1h 或客户端退出 → 重新登录换新凭证；有记住密码时自动
+/// 重登）。旧版 refreshToken 字段已移除（加载旧 config.json 时该键被忽略）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerConf {
@@ -29,8 +31,6 @@ pub struct ServerConf {
     pub username: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
-    #[serde(default)]
-    pub refresh_token: Option<String>,
     /// 信任自签证书（服务端 TLS 使用自签证书时开启，需求3）
     #[serde(default)]
     pub insecure_tls: bool,
@@ -273,6 +273,11 @@ pub struct AppConfig {
     /// 媒体/缩略图缓存配额（0.3.2 需求3/4/5）
     #[serde(default)]
     pub cache: CacheConf,
+    /// 客户端唯一标识（0.2.4 认证契约）：本机安装首次启动生成的 UUIDv4，
+    /// 登录时随凭证绑定（服务端逐请求核对 X-Client-Id 头）；多客户端同账号
+    /// 各持己凭证互不挤占。非机密（身份标识，明文存 config.json）。
+    #[serde(default)]
+    pub client_id: String,
 }
 
 impl Default for AppConfig {
@@ -287,8 +292,21 @@ impl Default for AppConfig {
             trash_retention_days: default_trash_days(),
             credentials: Vec::new(),
             cache: CacheConf::default(),
+            client_id: String::new(),
         }
     }
+}
+
+/// 进程内客户端唯一标识（启动时从配置装载；空=尚未生成/加载）。
+static CLIENT_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 取客户端唯一标识（HTTP 层 X-Client-Id 头与登录体共用）。
+pub fn client_id() -> &'static str {
+    CLIENT_ID.get().map(|s| s.as_str()).unwrap_or("")
+}
+
+fn set_client_id(id: &str) {
+    let _ = CLIENT_ID.set(id.to_string());
 }
 
 impl AppConfig {
@@ -297,7 +315,6 @@ impl AppConfig {
         let mut c = self.clone();
         for s in c.servers.iter_mut() {
             s.token = None;
-            s.refresh_token = None;
         }
         c
     }
@@ -324,20 +341,26 @@ impl AppState {
         for s in cfg.servers.iter_mut() {
             s.base_url = ServerConf::norm_base(&s.base_url);
         }
+        // 0.2.4：客户端唯一标识——首次启动生成 UUIDv4 并持久化（本机安装维度
+        // 稳定；登录绑定 + 逐请求 X-Client-Id 头）。
+        let id_changed = cfg.client_id.is_empty();
+        if id_changed {
+            cfg.client_id = uuid::Uuid::new_v4().to_string();
+        }
+        set_client_id(&cfg.client_id);
+        if id_changed {
+            write_config(&data_dir, &cfg.without_tokens())?;
+        }
         let keyring_ok = crate::secret::available();
         if keyring_ok {
             let mut migrated = false;
             for s in cfg.servers.iter_mut() {
-                if s.token.is_some() || s.refresh_token.is_some() {
+                if s.token.is_some() {
                     // 旧版明文 token → 一次性迁移进凭证库（config.json 稍后脱敏回写）
-                    let _ = crate::secret::set_tokens(&s.id, s.token.as_deref(), s.refresh_token.as_deref());
+                    let _ = crate::secret::set_tokens(&s.id, s.token.as_deref());
                     migrated = true;
-                } else {
-                    let (t, r) = crate::secret::get_tokens(&s.id);
-                    if t.is_some() || r.is_some() {
-                        s.token = t;
-                        s.refresh_token = r;
-                    }
+                } else if let Some(t) = crate::secret::get_tokens(&s.id) {
+                    s.token = Some(t);
                 }
             }
             if migrated {
@@ -349,13 +372,12 @@ impl AppState {
         // 需求9：关闭"启动恢复登录状态"时，上次保持登录的服务端在启动时一律置为退出
         // （清内存令牌 + 凭证库令牌；已记住的密码保留，供下次快速登录）。
         if !cfg.ui.restore_sessions {
-            let had = cfg.servers.iter().any(|s| s.token.is_some() || s.refresh_token.is_some());
+            let had = cfg.servers.iter().any(|s| s.token.is_some());
             if had {
                 for s in cfg.servers.iter_mut() {
                     s.token = None;
-                    s.refresh_token = None;
                     if keyring_ok {
-                        let _ = crate::secret::set_tokens(&s.id, None, None);
+                        let _ = crate::secret::set_tokens(&s.id, None);
                     }
                 }
                 let out = if keyring_ok { cfg.without_tokens() } else { cfg.clone() };
@@ -387,10 +409,10 @@ impl AppState {
         let prev_creds: Vec<CredRef> = guard.credentials.clone();
         // 需求1：记录变更前的令牌，keyring 只写真正变化的条目——
         // 前端位置持久化每 ~800ms 触发一次 save，全量重写会造成 Secret Service IPC 风暴。
-        let prev_tokens: Vec<(String, Option<String>, Option<String>)> = guard
+        let prev_tokens: Vec<(String, Option<String>)> = guard
             .servers
             .iter()
-            .map(|s| (s.id.clone(), s.token.clone(), s.refresh_token.clone()))
+            .map(|s| (s.id.clone(), s.token.clone()))
             .collect();
         f(&mut guard);
         let snapshot = guard.clone();
@@ -415,14 +437,12 @@ impl AppState {
             }
             let mut ring_err = String::new();
             for s in &snapshot.servers {
-                let changed = match prev_tokens.iter().find(|(id, _, _)| *id == s.id) {
-                    None => s.token.is_some() || s.refresh_token.is_some(),
-                    Some((_, pt, pr)) => pt != &s.token || pr != &s.refresh_token,
+                let changed = match prev_tokens.iter().find(|(id, _)| *id == s.id) {
+                    None => s.token.is_some(),
+                    Some((_, pt)) => pt != &s.token,
                 };
                 if changed {
-                    if let Err(e) =
-                        crate::secret::set_tokens(&s.id, s.token.as_deref(), s.refresh_token.as_deref())
-                    {
+                    if let Err(e) = crate::secret::set_tokens(&s.id, s.token.as_deref()) {
                         ring_err = e;
                     }
                 }

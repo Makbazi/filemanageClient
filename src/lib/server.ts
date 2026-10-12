@@ -184,11 +184,13 @@ export class ServerSource implements DataSource {
   }
 
   thumbPath(entry: FsEntry): Promise<string | null> {
-    // 0.3.3：Rust 走服务端 GET /thumb（Server ≥0.2.2 含 BMP——出图能力与本地缩放
-    // 对齐；浏览零下载）。413/415/403=永久无图（null，直接落图标——不再整文件
-    // 下载、不再空转重试）；网络/429/401/5xx=瞬时（抛错，FileView 队列退避重试）。
-    // 配 Server ≤0.2.0（端点 404）回退旧管线：整文件**静默**入媒体缓存后本地缩放
-    // （0.3.3 起查看通道不发 fm-transfer 事件，绝不出传输行）。size_hint 参数移除。
+    // 0.3.6（浏览零整文件定版）：Rust 走服务端 GET /thumb（只回 ≤512px JPEG，
+    // 几十 KB——打开图片目录不再拉取任何原图字节）。415/413/403/404=永久无图
+    // （null 直接落图标；含 ≤0.2.0 旧服务端 404——废除旧"整文件静默入缓存本地
+    // 缩放"兜底）；网络/429/401/5xx=瞬时（抛错，FileView 队列退避重试 ≤3 轮）。
+    // Server ≥0.2.4 起 JPEG/RAW 像素闸门提至 50MP（YCbCr 平面路径），常见手机/
+    // 单反原图仍出服务端小图；图标只剩 webp/heic 等无解码器形态。全量字节只在
+    // 双击查看（mediaCache）或下载（srv_download）时到来。size_hint 参数已移除。
     return invoke("srv_thumb", {
       serverId: this.serverId,
       rootId: this.rootId,

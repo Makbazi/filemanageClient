@@ -1,7 +1,9 @@
 //! 与 filemanageServer 交互：
-//! - 认证：服务端三层认证图签发的不透明随机凭证（64-hex，不编码身份；refreshToken
-//!   为同一凭证的兼容别名），需求22 的 3 周滑动会话语义保留——活跃使用自动滑动
-//! - 泛化 API 代理 srv_call（401 → 自动轮换凭证 → 重试 → 仍失败才报 AUTH_REQUIRED）
+//! - 认证（0.3.6 配套 Server 0.2.4）：单一无透明随机凭证（64-hex，登录响应只含
+//!   token，无 refreshToken/expiresIn/user 别名）；凭证绑定本机唯一标识 clientId
+//!   （一切请求带 X-Client-Id 头，服务端逐请求核对）；活跃使用服务端无感滑动续命
+//!   （凭证串不变），闲置 >1h 或退出即失效——下次请求自动用记住的密码重登
+//! - 泛化 API 代理 srv_call（401 → 自动重登 → 重试 → 仍失败才报 AUTH_REQUIRED）
 //! - 分片上传/断点续传/进度事件/取消/限速（需求3、18）
 //! - 流式下载 + .part 断点续传（Range）+ 进度事件
 //! - TLS：https 直连；服务端为自签证书时可按配置跳过校验（insecureTls）
@@ -119,6 +121,16 @@ fn client_cached(srv: &ServerConf, stream: bool) -> Result<reqwest::Client, Stri
     if !stream {
         b = b.timeout(Duration::from_secs(120));
     }
+    // 0.2.4：X-Client-Id 统一注入——本客户端一切请求自带唯一标识（绑定会话
+    // 由服务端逐请求核对；未绑定会话忽略）。进程内恒定，无需入缓存键。
+    let cid = crate::config::client_id();
+    if !cid.is_empty() {
+        let mut hdrs = reqwest::header::HeaderMap::new();
+        if let Ok(v) = cid.parse::<reqwest::header::HeaderValue>() {
+            hdrs.insert("X-Client-Id", v);
+            b = b.default_headers(hdrs);
+        }
+    }
     let c = apply_tls(srv, b)?
         .build()
         .map_err(|e| format!("HTTP 客户端构造失败: {}", req_detail(&e)))?;
@@ -169,7 +181,8 @@ async fn pace(limit_kbps: u32, bytes: u64, elapsed: Duration) {
 
 // ---------- 认证 ----------
 
-/// 登录：保存服务端签发的随机凭证（token/refreshToken 同值；服务端未返回 refreshToken 时仅存主凭证）。
+/// 登录：保存服务端签发的随机凭证（0.2.4 单凭证：响应只含 token；请求体带
+/// clientId 完成本客户端绑定）。
 /// remember=Some(true)：登录成功后把密码记入系统凭证库（需求3，按 服务端+账户 隔离）；
 /// Some(false)：清除该账户已记住的密码；None：保持现状。凭证库不可用时静默跳过。
 #[tauri::command]
@@ -184,7 +197,12 @@ pub async fn srv_login(
     let srv = st.server(&server_id)?;
     let resp = client_for(&srv)?
         .post(format!("{}/api/v1/auth/login", base_of(&srv)))
-        .json(&json!({ "username": username, "password": password }))
+        .json(&json!({
+            "username": username,
+            "password": password,
+            // 0.2.4：凭证绑定本客户端唯一标识（此后每请求带 X-Client-Id 头核对）
+            "clientId": crate::config::client_id(),
+        }))
         .send()
         .await
         .map_err(req_err)?;
@@ -197,15 +215,12 @@ pub async fn srv_login(
             .unwrap_or("登录失败")
             .into());
     }
+    // 0.2.4 单凭证契约：响应只含 token（无 refreshToken/expiresIn/user 回显）
     let token = body
         .get("token")
         .and_then(|t| t.as_str())
         .ok_or("服务端未返回 token")?
         .to_string();
-    let refresh = body
-        .get("refreshToken")
-        .and_then(|t| t.as_str())
-        .map(|s| s.to_string());
     // 记住密码（仅凭证库可用时；密码不进 config.json）
     if let Some(do_remember) = remember {
         if st.keyring_ok {
@@ -220,7 +235,6 @@ pub async fn srv_login(
     let snapshot = st.update(&app, |cfg| {
         if let Some(s) = cfg.servers.iter_mut().find(|s| s.id == server_id) {
             s.token = Some(token.clone());
-            s.refresh_token = refresh.clone();
             s.username = Some(username.clone());
         }
         match remember {
@@ -236,15 +250,17 @@ pub async fn srv_login(
     let _ = snapshot;
     // Rust 侧令牌/凭证变化广播 → 前端同步登录态（需求8 左右面板一致性）
     let _ = app.emit("fm-config-changed", ());
-    Ok(json!({ "ok": true, "user": body.get("user").cloned().unwrap_or(Value::Null),
+    Ok(json!({ "ok": true, "username": username,
         "passwordSaved": remember == Some(true) && st.keyring_ok }))
 }
 
 /// 自助改密（批次需求31）：POST /api/v1/auth/change-password。
 /// 服务端校验旧密码并作废全部会话，故成功后本地必须：
 ///   a) 若该账户启用了"记住密码"，把凭证库里的旧密码更新为新密码；
-///   b) 清空 token/refresh（下次操作走登录对话框）。
-/// 不经 srv_call（401 自动续期会重试一次，语义错误；旧密码错就是 401）。
+///   b) 清空本地 token（下次操作 401 时由 try_autologin 用新密码静默重登，
+///      未记住密码则走登录对话框）。
+/// 不经 srv_call（srv_call 的 401 自动重登会用旧密码重试，语义错误；旧密码
+/// 错就是 401）。
 #[tauri::command]
 pub async fn srv_change_password(
     app: AppHandle,
@@ -299,7 +315,6 @@ pub async fn srv_change_password(
         st.update(&app, |cfg| {
             if let Some(s) = cfg.servers.iter_mut().find(|s| s.id == server_id) {
                 s.token = None;
-                s.refresh_token = None;
             }
         })?;
     }
@@ -308,59 +323,81 @@ pub async fn srv_change_password(
     Ok(json!({ "ok": true, "reauthRequired": true, "passwordSaved": password_saved }))
 }
 
-/// 用 refresh token 换新的 access/refresh（轮换）。成功返回新 access token。
-async fn try_refresh(app: &AppHandle, server_id: &str) -> Result<String, String> {
+/// 0.2.4 认证契约的通用登录请求：POST /auth/login {username,password,clientId}，
+/// 响应只含单一随机凭证；成功即落存内存/keyring 并广播。不做"记住密码"
+/// （由调用方决定：srv_login 处理勾选，try_autologin 只复用已存密码）。
+async fn login_post(
+    app: &AppHandle,
+    server_id: &str,
+    username: &str,
+    password: &str,
+) -> Result<String, String> {
     let st = state(app);
     let srv = st.server(server_id)?;
-    let rt = srv
-        .refresh_token
-        .clone()
-        .ok_or_else(|| "AUTH_REQUIRED: 需要重新登录".to_string())?;
+    let cid = crate::config::client_id().to_string();
     let resp = client_for(&srv)?
-        .post(format!("{}/api/v1/auth/refresh", base_of(&srv)))
-        .json(&json!({ "refreshToken": rt }))
+        .post(format!("{}/api/v1/auth/login", base_of(&srv)))
+        .json(&json!({ "username": username, "password": password, "clientId": cid }))
         .send()
         .await
         .map_err(req_err)?;
     let status = resp.status();
     let body: Value = resp.json().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        // 会话过期（超过 3 周未使用）→ 需要重新登录
-        return Err("AUTH_REQUIRED: 会话已过期，请重新登录".into());
+        let msg = body
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("登录失败");
+        return Err(msg.to_string());
     }
     let token = body
         .get("token")
         .and_then(|t| t.as_str())
         .ok_or("服务端未返回 token")?
         .to_string();
-    let new_rt = body
-        .get("refreshToken")
-        .and_then(|t| t.as_str())
-        .map(|s| s.to_string());
     let sid = server_id.to_string();
+    let uname = username.to_string();
     st.update(app, |cfg| {
         if let Some(s) = cfg.servers.iter_mut().find(|s| s.id == sid) {
             s.token = Some(token.clone());
-            if let Some(r) = new_rt {
-                s.refresh_token = Some(r);
-            }
+            s.username = Some(uname);
         }
     })?;
-    // 续期轮换后前端 access token 字符串已旧：广播同步（需求8）
+    // Rust 侧令牌变化广播 → 前端同步登录态（需求8 左右面板一致性）
     let _ = app.emit("fm-config-changed", ());
     Ok(token)
+}
+
+/// 401 → **自动重登**（0.2.4，取代旧"凭证轮换/refresh"链路）：活跃滑动续期由
+/// 服务端无感完成、凭证串永不变化，401 意味着闲置超 1h / 客户端退出（登出或
+/// 异常）/ 客户端标识变更 / 被撤权——此时用配置里的用户名 + 凭证库记住的密码
+/// 静默换发新凭证（同 clientId 重新绑定）。重启客户端后的首请求 401 同样走
+/// 这里——即"退出重开、有已保存密码直接自动登录"。无用户名/未记住密码/凭证
+/// 库不可用 → Err，上层按既有 AUTH_REQUIRED 路径弹登录框。
+async fn try_autologin(app: &AppHandle, server_id: &str) -> Result<String, String> {
+    let st = state(app);
+    let srv = st.server(server_id)?;
+    let username = srv.username.clone().unwrap_or_default();
+    if username.is_empty() || !st.keyring_ok {
+        return Err("AUTH_REQUIRED: 需要重新登录".into());
+    }
+    let password = crate::secret::get_password(server_id, &username)
+        .ok_or_else(|| "AUTH_REQUIRED: 需要重新登录".to_string())?;
+    login_post(app, server_id, &username, &password).await
 }
 
 #[tauri::command]
 pub async fn srv_logout(app: AppHandle, server_id: String) -> Result<(), String> {
     let st = state(&app);
-    // 尽力通知服务端注销会话（失败不阻塞本地登出）
+    // 尽力通知服务端撤销凭证（0.2.4 单凭证契约：{token}；失败不阻塞本地登出）
     if let Ok(srv) = st.server(&server_id) {
-        if let Some(rt) = srv.refresh_token.clone() {
+        if let Some(t) = srv.token.clone() {
             if let Ok(c) = client_for(&srv) {
+                // 登出路由挂登录态（auth 组）：带 Bearer 即撤"当前凭证"
                 let _ = c
                     .post(format!("{}/api/v1/auth/logout", base_of(&srv)))
-                    .json(&json!({ "refreshToken": rt }))
+                    .bearer_auth(&t)
+                    .json(&json!({ "token": t }))
                     .send()
                     .await;
             }
@@ -369,12 +406,44 @@ pub async fn srv_logout(app: AppHandle, server_id: String) -> Result<(), String>
     st.update(&app, |cfg| {
         if let Some(s) = cfg.servers.iter_mut().find(|s| s.id == server_id) {
             s.token = None;
-            s.refresh_token = None;
         }
     })?;
     // 登出立即广播：左侧徽章与右侧数据面板同步（需求8）
     let _ = app.emit("fm-config-changed", ());
     Ok(())
+}
+
+/// 0.2.4：正常退出前尽力撤销所有服务端的登录凭证（RunEvent::ExitRequested 调用；
+/// 异常退出不到这一步，由服务端闲置 1h 滑动过期兜底）。串行、每条 1.2s 超时、
+/// 失败一律忽略——绝不阻塞退出流程。
+pub fn logout_all_for_exit(app: &AppHandle) {
+    let st = state(app);
+    let jobs: Vec<(String, String)> = st
+        .config()
+        .servers
+        .iter()
+        .filter_map(|s| s.token.clone().map(|t| (s.id.clone(), t)))
+        .collect();
+    if jobs.is_empty() {
+        return;
+    }
+    let _ = tauri::async_runtime::block_on(async move {
+        for (sid, token) in jobs {
+            let srv = match st.server(&sid) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let Ok(c) = client_for(&srv) else { continue };
+            // auth 组路由要求登录态：Bearer 当前凭证（登出路由同时撤销头/体凭证）
+            let _ = c
+                .post(format!("{}/api/v1/auth/logout", base_of(&srv)))
+                .bearer_auth(&token)
+                .json(&json!({ "token": token }))
+                .timeout(Duration::from_millis(1200))
+                .send()
+                .await;
+        }
+    });
 }
 
 // ---------- 记住的账户密码管理（需求3） ----------
@@ -414,7 +483,8 @@ fn api_error(status: reqwest::StatusCode, text: &str) -> String {
 }
 
 /// 泛化 API 调用：method=GET|POST|PUT|DELETE，path 以 / 开头。
-/// 401 时自动用 refresh token 续期并重试一次；仍失败返回 AUTH_REQUIRED 前缀错误。
+/// 401 时自动重登（try_autologin，0.2.4 单凭证契约）并重试一次；仍失败返回
+/// AUTH_REQUIRED 前缀错误（前端登录对话框承接）。
 #[tauri::command]
 pub async fn srv_call(
     app: AppHandle,
@@ -445,8 +515,8 @@ pub async fn srv_call(
         let status = resp.status();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if status.as_u16() == 401 && attempt == 0 {
-            // 尝试刷新会话后重试（需求22）
-            if try_refresh(&app, &server_id).await.is_ok() {
+            // 自动重登后重试（需求22：1h 滑动窗口，0.2.4 单凭证）
+            if try_autologin(&app, &server_id).await.is_ok() {
                 continue;
             }
         }
@@ -481,7 +551,7 @@ async fn authed_get(
         }
         let resp = req.send().await.map_err(req_err)?;
         if resp.status().as_u16() == 401 && attempt == 0 {
-            if try_refresh(app, server_id).await.is_ok() {
+            if try_autologin(app, server_id).await.is_ok() {
                 continue;
             }
         }
@@ -991,7 +1061,7 @@ async fn complete_post(app: &AppHandle, server_id: &str, session_id: &str) -> Re
             Ok(Ok(r)) => r,
         };
         let status = resp.status();
-        if status.as_u16() == 401 && attempt == 0 && try_refresh(app, server_id).await.is_ok() {
+        if status.as_u16() == 401 && attempt == 0 && try_autologin(app, server_id).await.is_ok() {
             continue; // 401 在进入业务前返回，无副作用，重发安全
         }
         let text = match tokio::time::timeout(COMPLETE_TIMEOUT, resp.text()).await {
@@ -1094,7 +1164,7 @@ async fn put_chunk_try(
         let text = resp.text().await.unwrap_or_default();
         let code = status.as_u16();
         if code == 401 && attempt == 0 {
-            if try_refresh(app, server_id).await.is_ok() {
+            if try_autologin(app, server_id).await.is_ok() {
                 continue;
             }
             return Err(ChunkFail::Fatal(api_error(status, &text)));
@@ -1331,23 +1401,19 @@ pub async fn srv_preview_data(
     ))
 }
 
-/// 服务端文件缩略图（网格视图，需求14；0.3.2"浏览零下载"核心；0.3.3 契约收紧）。
-/// 优先走服务端 `GET /api/v1/thumb`：只回 ≤512px JPEG，**网格浏览不把整文件
-/// 拉进本地媒体缓存**；产物仍落媒体缓存 `<key_hash>.thumb.jpg`（与旧管线同名
-/// 同键，前端 blob 通道不变）。Server 0.2.2 起白名单含 BMP（出图能力与本地
-/// 缩放机制对齐）；服务端不可解码的（webp/heic 等）小文件仍可由旧管线静默入
-/// 缓存后本地缩放（与本地目录"≤8MiB 浏览器自绘"同形——查看允许临时落盘的
-/// 既定边界，且 0.3.3 起该通道**绝不出现传输行**）。
-/// 0.3.3 返回值契约（与 DataSource.thumbPath 对齐；size_hint 参数移除）：
-///  - `Ok(Some(path))` = 缩略图就绪（媒体缓存绝对路径，前端经 media_read_bytes
-///    建 blob，≤2GB 内存 LRU）；
-///  - `Ok(None)` = **永久无图**（413/415/403 语义拒绝、或旧管线也出不来图）——
-///    前端直接落图标：不再整文件下载、不再无谓重试（0.3.2 的 ">8MiB 报错重试
-///    3 轮" 浪费往返且最终同结果）；
-///  - `Err` = **瞬时失败**（网络/429 繁忙重试耗尽/401 续期失败/5xx）——
+/// 服务端文件缩略图（网格视图，需求14；0.3.2"浏览零下载"核心；0.3.3 契约收紧；
+/// 0.3.6 **浏览零整文件**定版）。走服务端 `GET /api/v1/thumb`：只回 ≤512px JPEG
+/// （几十 KB），产物落媒体缓存 `<key_hash>.thumb.jpg`（前端 blob 通道不变）。
+/// Server 0.2.2 起白名单含 BMP；Server 0.2.4 起 JPEG/RAW 走 YCbCr 平面路径
+/// （50MP/9000px 闸门）——48MP 手机/单反原图也能直接拿到服务端小图。
+/// 0.3.6 返回值契约（与 DataSource.thumbPath 对齐）：
+///  - `Ok(Some(path))` = 缩略图就绪（媒体缓存绝对路径，media_read_bytes 建 blob）；
+///  - `Ok(None)` = **永久无图=图标**（415 格式不支持/像素超限、413 >64MiB、
+///    403 权限、404 ≤0.2.0 旧服务端无端点）——**任何情况都不再整文件下载兜底**
+///    （废除 0.3.5 的本地缩放回退：浏览目录不得拉取原图字节，全量字节只在
+///    双击查看/下载时经 mediaCache/srv_download 到来）；
+///  - `Err` = **瞬时失败**（网络/429 繁忙重试耗尽/401 重登失败/5xx）——
 ///    前端队列退避重试 ≤3 轮。
-/// 404（Server ≤0.2.0 无端点）→ 旧管线：srv_media_ensure 整文件静默入缓存 +
-/// thumb::ensure_thumb 本地缩放（配旧服务端的功能兼容面见 CHANGELOG）。
 #[tauri::command]
 pub async fn srv_thumb(
     app: AppHandle,
@@ -1393,39 +1459,20 @@ pub async fn srv_thumb(
         }
         ServerThumb::Permanent => return Ok(None),
         ServerThumb::Busy(msg) => return Err(msg),
-        // 0.3.5 需求1（Windows 网格高像素图/NEF 落图标）：415=服务端生成上限
-        // （thumbMaxPixels 12MP/边长 6000px/不识别格式——为守服务端 ≤200MB 解码
-        // 内存峰值），并非"无图"。客户端 Rust image crate 解码能力强于 Go 标准库
-        // （高 MP JPEG/CMYK/RAW 内嵌预览均可缩）——落到下面的旧管线本地缩放
-        // （静默整文件入媒体缓存一次，此后 exists 秒回，仍受磁盘 LRU 管辖）。
-        // 413（>64MiB，整文件拉取过重）与 403（权限）维持永久无图不变。
-        ServerThumb::Unsupported | ServerThumb::Legacy => {}
-    }
-    // 旧管线（Server ≤0.2.0 无 /thumb，或本批 415 语义回退）：整文件静默入媒体缓存后本地缩放
-    let src = srv_media_ensure(&app, &server_id, &root_id, &path, ver.as_deref()).await?;
-    match crate::thumb::ensure_thumb(&st, &key, &src) {
-        Ok(t) => Ok(Some(t.to_string_lossy().into_owned())),
-        Err(_) => {
-            // 本地也解不了（svg 等）：≤8MiB 回原路径交浏览器自绘（与 fs_thumb 同形），否则永久无图
-            if std::fs::metadata(&src).map(|m| m.len() <= 8 << 20).unwrap_or(false) {
-                Ok(Some(src.to_string_lossy().into_owned()))
-            } else {
-                Ok(None)
-            }
-        }
     }
 }
 
 enum ServerThumb {
-    /// 服务端：直接拿到 ≤512px JPEG 字节
+    /// 服务端：直接拿到 ≤512px JPEG 字节（浏览面唯一的网络流量）
     Bytes(Vec<u8>),
-    /// 端点不存在（旧服务端）→ 旧管线
-    Legacy,
-    /// 服务端明确拒绝出图（413 过大/403 权限）——永久无图，零下载零重试
+    /// 服务端明确不出图：415（像素闸门/格式不识别）、413（>64MiB）、403（权限）、
+    /// 404（≤0.2.0 旧服务端无 /thumb 端点）——**一律永久无图=图标，零下载零重试**。
+    /// 0.3.6 起废除 0.3.5 的"整文件静默入媒体缓存本地缩放"兜底：浏览目录不得
+    /// 拉取原图字节（需求：仅预览只要几十 KB 缩略图；全量字节只在双击查看/下载
+    /// 时经 mediaCache/srv_download 到来）。配合 Server 0.2.4 的 YCbCr 平面路径
+    /// （JPEG/RAW 50MP 闸门），常见手机/单反原图仍能直接拿到服务端小图，
+    /// 图标只剩 webp/heic/tiff 等真正的无解码器形态与超限文件。
     Permanent,
-    /// 415 服务端生成不了（像素闸门/格式不识别）≠ 无图：客户端本地缩放兜底
-    ///（0.3.5 需求1，见 srv_thumb 注释）
-    Unsupported,
     /// 瞬时失败（网络/429 重试耗尽/401/5xx）——前端退避重试
     Busy(String),
 }
@@ -1456,9 +1503,9 @@ async fn fetch_server_thumb(app: &AppHandle, server_id: &str, root_id: &str, pat
                 Ok(b) => return ServerThumb::Bytes(b.to_vec()),
                 Err(e) => return ServerThumb::Busy(format!("缩略图流读取失败: {e}")),
             },
-            404 => return ServerThumb::Legacy, // 旧服务端无此端点
-            413 | 403 => return ServerThumb::Permanent,
-            415 => return ServerThumb::Unsupported, // 0.3.5：服务端出不了图≠无图，走本地缩放兜底
+            // 0.3.6 浏览零整文件：404（≤0.2.0 旧服务端无端点）与 415（服务端
+            // 出不了图）与 413/403 同归永久无图=图标，不再走任何整文件兜底。
+            404 | 413 | 403 | 415 => return ServerThumb::Permanent,
             429 => {
                 if attempt < 2 {
                     tokio::time::sleep(Duration::from_millis(2000 << attempt)).await;

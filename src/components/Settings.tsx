@@ -18,7 +18,6 @@ import {
   credForget,
   fetchRoots,
   ffmpegProbe,
-  serverCall,
   serverChangePassword,
   serverLogout,
   testPlayerCommand,
@@ -434,11 +433,14 @@ export default function Settings(p: Props) {
               </label>
             </div>
             <p className="dim tip">
-              系统解码器 = 操作系统自带的视频组件（Windows：WebView2/Media Foundation；Linux：GStreamer）。
-              H.265/HEVC 需系统装有对应解码组件（Windows「HEVC 视频扩展」，Linux gstreamer HEVC 插件）；
-              窗口内播放失败时查看器会给出提示，可一键「用 ffmpeg 转码播放」或改用外部播放器。
-              ffmpeg 转码档 = 无法直接解码的视频先由 ffmpeg 转成 H.264 MP4 再在窗口内播放
-              （首次转码有等待、之后直接复用产物；转码产物入媒体缓存、受缓存上限自动淘汰）。
+              0.3.6 起三档共用真实编码探测（`ffmpeg -i` 窥首轨编码，毫秒级）：检测到 H.265/HEVC 时——
+              配置了可用 ffmpeg（本设置「ffmpeg 路径」或 PATH）就<b>自动转码后窗口内播放</b>（首次转码有
+              等待、之后复用产物），不再先撞一次必然失败的系统解码；未配置 ffmpeg 则维持系统解码尝试，
+              失败面板给「用 ffmpeg 转码播放 / 用外部播放器打开」一键兜底。
+              系统解码器 = 操作系统自带的视频组件（Windows：WebView2/Media Foundation；Linux：GStreamer；
+              H.265 需「HEVC 视频扩展」/gstreamer HEVC 插件才可能直接播出）。
+              ffmpeg 转码档 = 凡无法直接解码的视频一律先转 H.264 MP4 再窗口内播放（HEVC-in-MP4 也会转，
+              旧版被容器后缀放行导致播放失败的问题已修复）；转码产物入媒体缓存、受缓存上限自动淘汰。
             </p>
             {cfg.ui.videoDecoder === "external" && (
               <>
@@ -725,20 +727,14 @@ export default function Settings(p: Props) {
   );
 }
 
-// ---------- 账户页：当前来源身份管理 ----------
-// 未登录 → 点击登录；已登录 → 显示身份与可访问目录，可切换账户（登出并换身份重登）/退出登录。
-
-interface MeInfo {
-  id: number;
-  username: string;
-  role: string;
-  createdAt?: string;
-}
+// ---------- 账户页：当前来源登录态管理 ----------
+// 未登录 → 点击登录；已登录 → 显示账户名与可访问目录，可切换账户（登出并换身份
+// 重登）/退出登录。**0.3.6 认证契约：客户端只持 token、不查询自身身份/角色**——
+// 账户名取本地配置（登录时 Rust 权威落存），服务端 /auth/me 亦不再回 role/id。
 
 function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
   const a = active();
   const srv = a.kind === "server" ? p.cfg.servers.find((s) => s.id === a.serverId) : undefined;
-  const [me, setMe] = useState<MeInfo | null>(null);
   const [roots, setRoots] = useState<ServerRoot[]>([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -751,14 +747,11 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
   const [pwErr, setPwErr] = useState("");
 
   useEffect(() => {
-    setMe(null);
     setRoots([]);
     setErr("");
     if (!srv?.token) return;
     let cancelled = false;
-    serverCall("GET", "/api/v1/auth/me")
-      .then((r) => { if (!cancelled) setMe(r as MeInfo); })
-      .catch((e) => { if (!cancelled) setErr(String(e)); });
+    // 不查 /auth/me（客户端无身份查询）；roots 是业务数据（可访问目录清单）
     fetchRoots(srv.id)
       .then((rs) => { if (!cancelled) setRoots(rs ?? []); })
       .catch(() => undefined);
@@ -773,7 +766,6 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
     setBusy(true);
     try {
       await serverLogout(srv.id);
-      setMe(null);
       setRoots([]);
       if (relogin) p.onLogin(srv.id); // 切换账户：登出后立即弹登录框换身份
     } catch (e) {
@@ -799,7 +791,6 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
         : "密码已修改，请使用新密码重新登录。");
       setPwOld("");
       setPwNew("");
-      setMe(null);
       setRoots([]);
     } catch (e) {
       setPwErr(String(e).replace(/^AUTH_REQUIRED:\s*/, ""));
@@ -827,9 +818,9 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
         <div>
           <div className="list-name">{srv.name || "(未命名)"}　<span className="dim path-cell">{srv.baseUrl}</span></div>
           <div className="dim">
-            {me
-              ? `已登录为：${me.username}（${me.role === "admin" ? "管理员" : "普通用户"}）`
-              : srv.token ? "会话恢复中…" : "未登录（游客：可浏览公开内容，登录后可下载/上传/修改）"}
+            {srv.token
+              ? `已登录为：${srv.username ?? "—"}`
+              : "未登录（游客：可浏览公开内容，登录后可下载/上传/修改）"}
           </div>
         </div>
         {!srv.token && (
@@ -852,7 +843,7 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
             ))}
         </div>
       )}
-      {me && (
+      {srv.token && (
         <>
           <div className="field">
             <label>该身份可访问的目录（由服务端管理员分配）</label>
@@ -922,7 +913,7 @@ function AboutTab(p: { info: AppInfo }) {
       </div>
       <div className="list-row">
         <span className="dim">配套服务端</span>
-        <span className="about-val">0.2.x（推荐，当前 0.2.3）· 0.1.x 可用</span>
+        <span className="about-val">0.2.x（推荐，当前 0.2.4）· 0.1.x 可用</span>
       </div>
       <p className="dim tip">
         版本号读自安装包自身元数据：构建脚本以 -V 指定产物版本时，这里显示的就是该注入值（不改动工程版本源文件）。

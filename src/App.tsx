@@ -141,7 +141,7 @@ function LoginModal(p: PromptLoginProps) {
         <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
         记住密码（存系统凭证库，按服务端+账户隔离，供下次快速登录）
       </label>
-      <div className="dim tip">登录后会话最长保留 3 周（活跃自动续期）。管理员账户只能在服务端管理台登录。</div>
+      <div className="dim tip">登录后 1 小时内活跃自动续期（凭证不变、无感知）；闲置超过 1 小时或退出客户端需重新登录——已记住密码时重开自动登录。管理员账户只能在服务端管理台登录。</div>
       {err && <div className="error-bar">{err}</div>}
       <div className="modal-actions">
         <button className="btn ghost" onClick={p.onClose}>

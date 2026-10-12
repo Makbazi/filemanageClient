@@ -107,7 +107,6 @@ export default function FileView(p: Props) {
   const failedRef = useRef<Set<string>>(new Set()); // 瞬时耗尽（可随再可见重武装），≠永久无图（0.3.5）
   const rearmRef = useRef<Map<string, number>>(new Map()); // 每 key 重武装次数（≤3 防死循环）
   const runningRef = useRef(0);
-  const slowRef = useRef(0); // >16MiB 慢通道在途数（并发≤1，防整文件兜底饿死快图，0.3.5）
   const settledRef = useRef<Set<string>>(new Set());
   const attemptsRef = useRef<Map<string, number>>(new Map());
   const entriesRef = useRef<Map<string, FsEntry>>(new Map());
@@ -139,7 +138,7 @@ export default function FileView(p: Props) {
     visibleRef.current = new Set();
     failedRef.current = new Set();
     rearmRef.current = new Map();
-    // runningRef/slowRef 不重置：在途 future 结束时各自减一（重置会致负值放大并发）
+    // runningRef 不重置：在途 future 结束时各自减一（重置会致负值放大并发）
     settledRef.current = new Set();
     attemptsRef.current = new Map();
     for (const t of timersRef.current) clearTimeout(t);
@@ -169,16 +168,15 @@ export default function FileView(p: Props) {
   //  ① 视口优先：旧 FIFO 下滚动新进入的格子排在全部预取旧格之后，被大文件
   //    整文件兜底通道饿死（池仅 3）。现在每次取任务优先取仍在视口(±2屏)内的
   //    队首项，滚到哪先出哪。
-  //  ② 慢通道隔离：>16MiB 条目（415/≤0.2.0 整文件下载兜底候选）并发 ≤1，
-  //    不再占满快图槽位。
+  //  ②（0.3.6 移除）慢通道隔离：旧 >16MiB 条目并发 ≤1 是为"整文件下载兜底"
+  //    设置的限流；srv_thumb 浏览零整文件后 /thumb 响应恒为几十 KB，隔离失去
+  //    存在理由，并发统一 3。
   //  ③ 瞬时失败不再永久化：3 轮退避耗尽只落图标（failedRef），单元格再次
   //    进入视口即重武装重入队（每 key ≤3 批，防真坏文件死循环）。
-  const SLOW_BYTES = 16 << 20;
   function dispatchThumbs() {
     while (runningRef.current < 3) {
       const q = queueRef.current;
       let idx = -1;
-      let slow = false;
       let purged = false;
       // 两遍扫描：先取仍在视口(±2屏)内的（滚到哪先出哪），再取预取区的（FIFO）
       for (let pass = 0; pass < 2 && idx < 0; pass++) {
@@ -191,17 +189,13 @@ export default function FileView(p: Props) {
             continue;
           }
           if (pass === 0 ? !visibleRef.current.has(k) : false) continue;
-          const e = entriesRef.current.get(k);
-          const isSlow = !!e && e.size > SLOW_BYTES;
-          if (isSlow && slowRef.current >= 1) continue; // 慢通道满：跳过取下一个可跑项
           idx = i;
-          slow = isSlow;
           break;
         }
       }
       if (idx < 0) {
         if (purged) continue; // 剔除了作废项，重扫队列
-        break; // 无可运行项（或队列空/仅慢项且慢道满）
+        break; // 无可运行项（或队列空）
       }
       const key = q.splice(idx, 1)[0];
       queuedRef.current.delete(key);
@@ -214,12 +208,11 @@ export default function FileView(p: Props) {
         continue;
       }
       runningRef.current++;
-      if (slow) slowRef.current++;
       void (async () => {
         try {
           const path = await api.source().thumbPath(e);
           if (!path) {
-            settleThumb(key, null); // Rust 明示无缩略图（413/403/真无图）：图标回退，不重试
+            settleThumb(key, null); // Rust 明示无缩略图（415/404/413/403 永久面）：图标回退，不重试
             return;
           }
           const url = await thumbBlobUrl(key, path);
@@ -244,7 +237,6 @@ export default function FileView(p: Props) {
           }
         } finally {
           runningRef.current--;
-          if (slow) slowRef.current--;
           dispatchThumbs();
         }
       })();
