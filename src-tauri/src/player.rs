@@ -9,6 +9,10 @@
 //! "ffmpeg"，不内嵌）——`ffmpeg_playable` 把 WebView 不能直放的媒体缓存条目转码成
 //! H.264/AAC MP4（`<hash>.ffmpeg.mp4`，入媒体缓存、受磁盘 LRU、产物复用）；系统
 //! 解码失败面板同样提供一键转码。`ffmpeg_probe` 供设置页探测可用性。
+//! 0.3.6（修 H.265 无法播放）：新增 `video_codec_probe`/`probe_video_codec`——
+//! 以 `ffmpeg -i` 窥首轨真实编码（旧实现只看容器后缀，HEVC-in-mp4 被放行给
+//! webview 必失败）；ffmpeg 档短路前先探测，system 档查看器探测到 HEVC 自动转码
+//! 或直出引导面板（FileViewer 侧编排），不再撞一次必然失败的解码。
 //! 转码是本机 CPU 行为，**不产生任何 fm-transfer 事件**（需求1：查看不触发传输）。
 
 use crate::config;
@@ -120,9 +124,72 @@ fn no_window(c: &mut tokio::process::Command) {
 #[cfg(not(windows))]
 fn no_window(_c: &mut tokio::process::Command) {}
 
-/// WebView 大概率可直放的容器/流扩展名（只看容器——无法窥编码，HEVC-in-mp4
-/// 仍会系统解码失败，由失败面板"用 ffmpeg 转码播放"force 兜底）。
+/// WebView 大概率可直放的容器/流扩展名（0.3.6 起不再盲信容器——先窥编码再决定
+/// 短路，HEVC-in-mp4 会在此被识别并转码，见 probe_video_codec）。
 const WEBVIEW_DIRECT_EXT: &[&str] = &["mp4", "m4v", "mov", "webm", "m4a", "mp3", "ogg", "ogv"];
+
+/// WebView 系统解码器普遍不支持的帧内编码（探测命中即走 ffmpeg 转码）。
+pub fn is_webview_unfriendly_codec(codec: &str) -> bool {
+    matches!(codec, "hevc" | "hvc1" | "hev1")
+}
+
+fn codec_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 视频首轨编码探测（0.3.6 需求1，修"H.265 依旧无法播放"）：
+/// `ffmpeg -hide_banner -i <src>` 仅解容器头（毫秒级；无输出文件时退出码非 0
+/// 属正常，流信息在 stderr），取第一条 "Video: <codec>" 的编码名小写。
+/// 返回空串=判不了（ffmpeg 缺失/无视频轨/畸形输出）——**正向结果按路径缓存**
+/// （同文件重复打开免重复 spawn；负向不缓存，配置好 ffmpeg 后立即可得）。
+async fn probe_video_codec(st: &config::AppState, src: &str) -> String {
+    if let Ok(map) = codec_cache().lock() {
+        if let Some(hit) = map.get(src) {
+            return hit.clone();
+        }
+    }
+    let bin = ffmpeg_bin(st);
+    let mut c = tokio::process::Command::new(&bin);
+    c.args(["-hide_banner", "-i", src]);
+    no_window(&mut c);
+    let codec = match c.output().await {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stderr).into_owned();
+            match text.find("Video:") {
+                Some(pos) => {
+                    let rest = &text[pos + "Video:".len()..];
+                    rest.trim_start()
+                        .split(|ch: char| ch == ' ' || ch == '(' || ch == ',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_lowercase()
+                }
+                None => String::new(),
+            }
+        }
+        Err(_) => String::new(), // ffmpeg 缺失/不可执行：判不了
+    };
+    if !codec.is_empty() {
+        if let Ok(mut map) = codec_cache().lock() {
+            if map.len() > 512 {
+                map.clear(); // 粗粒度回收：探测成本低，整表重置可接受
+            }
+            map.insert(src.to_string(), codec.clone());
+        }
+    }
+    codec
+}
+
+/// 前端入口（0.3.6）：媒体缓存视频 → 首轨编码名（""=判不了）。
+#[tauri::command]
+pub async fn video_codec_probe(app: AppHandle, path: String) -> Result<String, String> {
+    let st = config::state(&app);
+    let src = guarded_cache_path(&st, &path)?;
+    Ok(probe_video_codec(&st, &src).await)
+}
 
 /// 设置页"探测 ffmpeg"（0.3.3 需求3）：跑 `-version` 返回首行版本串。
 #[tauri::command]
@@ -161,8 +228,14 @@ pub async fn ffmpeg_playable(app: AppHandle, path: String, force: Option<bool>) 
         .and_then(|x| x.to_str())
         .unwrap_or("")
         .to_lowercase();
+    // 0.3.6：容器直放短路前先窥编码——HEVC-in-mp4 不再短路、直接转码
+    // （修"H.265 依旧无法播放"的容器盲区）；判不了（ffmpeg 缺失等）维持
+    // 旧行为原路返回，由查看器系统解码失败面板兜底。
     if !force.unwrap_or(false) && WEBVIEW_DIRECT_EXT.contains(&ext.as_str()) {
-        return Ok(src);
+        let codec = probe_video_codec(&st, &src).await;
+        if !is_webview_unfriendly_codec(&codec) {
+            return Ok(src);
+        }
     }
     let key = crate::serverapi::simple_hash(&format!("ffmpeg|{src}"));
     let out = st.media_cache_dir().join(format!("{key:x}.ffmpeg.mp4"));

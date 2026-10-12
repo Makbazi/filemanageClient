@@ -87,10 +87,10 @@ fn get_config(app: AppHandle) -> AppConfig {
 }
 
 /// 前端保存配置。需求1/8：**服务端令牌与已记住账户索引是 Rust 侧
-/// 独占的权威状态**（srv_login/try_refresh/srv_logout/cred_forget 维护，事件
-/// fm-config-changed 广播同步）；本命令忽略前端快照携带的 token/refreshToken/
-/// credentials——否则前端 800ms 防抖保存会把已轮换作废的旧令牌写回内存与
-/// keyring，造成"选择远程后一直刷新/登录框反复弹出"。
+/// 独占的权威状态**（srv_login/try_autologin/srv_logout/cred_forget 维护，事件
+/// fm-config-changed 广播同步）；本命令忽略前端快照携带的 token/credentials——
+/// 否则前端 800ms 防抖保存会把已作废的旧令牌写回内存与 keyring，造成
+/// "选择远程后一直刷新/登录框反复弹出"。
 #[tauri::command]
 fn save_config(app: AppHandle, mut config: AppConfig) -> Result<AppConfig, String> {
     let st = config::state(&app);
@@ -98,13 +98,17 @@ fn save_config(app: AppHandle, mut config: AppConfig) -> Result<AppConfig, Strin
         for s in config.servers.iter_mut() {
             if let Some(old) = c.servers.iter().find(|o| o.id == s.id) {
                 s.token = old.token.clone();
-                s.refresh_token = old.refresh_token.clone();
                 if s.username.is_none() {
                     s.username = old.username.clone();
                 }
             }
         }
         config.credentials = c.credentials.clone();
+        // 0.3.6：客户端唯一标识同样是 Rust 侧权威状态——前端快照缺失/为空时
+        // 绝不把本机标识清空（清空=下次启动换标识=全部绑定会话作废）。
+        if config.client_id.is_empty() {
+            config.client_id = c.client_id.clone();
+        }
         *c = config;
     })
 }
@@ -222,6 +226,8 @@ pub fn run() {
             // ffmpeg 转码播放（0.3.3 需求3：ffmpeg 档位 + 设置页探测；不内嵌 ffmpeg）
             player::ffmpeg_probe,
             player::ffmpeg_playable,
+            // 0.3.6：视频编码探测（H.265 自动转码编排；ffmpeg -i 窥首轨编码）
+            player::video_codec_probe,
             // 记住的服务端账户密码（需求3）
             serverapi::cred_take,
             serverapi::cred_forget,
@@ -230,6 +236,14 @@ pub fn run() {
             ai::ai_list_local,
             ai::ai_search_local
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // 0.3.6（配套 Server 0.2.4 单凭证契约）：正常退出前尽力撤销各服务端
+            // 登录凭证——"客户端退出即需重新登录"由下一次启动的自动重登承接；
+            // 异常退出走不到这里，由服务端闲置 1h 滑动过期兜底。
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                serverapi::logout_all_for_exit(app);
+            }
+        });
 }

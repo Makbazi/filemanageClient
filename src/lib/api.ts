@@ -192,6 +192,13 @@ export async function ffmpegPlayable(path: string, force = false): Promise<strin
   return invoke("ffmpeg_playable", { path, force: force ? true : null }) as Promise<string>;
 }
 
+/** 0.3.6（H.265 修复）：媒体缓存视频首轨编码探测——`ffmpeg -i` 窥真实编码
+ *  （毫秒级；正向结果 Rust 侧缓存）。返回如 "hevc"/"h264"；空串=判不了
+ *  （ffmpeg 未配置/无视频轨）。不产生任何传输事件。 */
+export async function videoCodecProbe(path: string): Promise<string> {
+  return invoke("video_codec_probe", { path }) as Promise<string>;
+}
+
 export function fetchRoots(serverId: string): Promise<ServerRoot[]> {
   return srvCall<ServerRoot[]>(serverId, "GET", "/api/v1/roots");
 }

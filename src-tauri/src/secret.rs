@@ -22,10 +22,11 @@ pub fn available() -> bool {
     ok
 }
 
-/// 写入/清除一个服务端的 access + refresh token（None = 删除对应项）。
-pub fn set_tokens(server_id: &str, token: Option<&str>, refresh: Option<&str>) -> Result<(), String> {
-    put(server_id, "token", token)?;
-    put(server_id, "refresh", refresh)
+/// 写入/清除一个服务端登录凭证（0.2.4 单凭证契约；None = 删除）。
+/// 顺带清理 ≤0.3.5 时代残留的 refresh 条目（幂等、失败忽略）。
+pub fn set_tokens(server_id: &str, token: Option<&str>) -> Result<(), String> {
+    let _ = put(server_id, "refresh", None);
+    put(server_id, "token", token)
 }
 
 fn put(server_id: &str, kind: &str, val: Option<&str>) -> Result<(), String> {
@@ -39,18 +40,16 @@ fn put(server_id: &str, kind: &str, val: Option<&str>) -> Result<(), String> {
     }
 }
 
-pub fn get_tokens(server_id: &str) -> (Option<String>, Option<String>) {
-    let g = |kind: &str| {
-        entry(server_id, kind)
-            .ok()
-            .and_then(|e| e.get_password().ok().filter(|s| !s.is_empty()))
-    };
-    (g("token"), g("refresh"))
+pub fn get_tokens(server_id: &str) -> Option<String> {
+    entry(server_id, "token")
+        .ok()
+        .and_then(|e| e.get_password().ok().filter(|s| !s.is_empty()))
 }
 
 /// 删除服务端配置时连带清理其凭证。
 pub fn remove(server_id: &str) {
-    let _ = set_tokens(server_id, None, None);
+    let _ = set_tokens(server_id, None);
+    let _ = put(server_id, "refresh", None);
 }
 
 // ---------- 记住的登录密码（需求3：键含 username，服务端+账户 维度隔离） ----------
