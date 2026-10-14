@@ -176,6 +176,9 @@ pub struct WalkEntry {
     pub rel_path: String,
     pub is_dir: bool,
     pub size: u64, // 目录为 0
+    /// 0.3.7 需求2：修改时间（毫秒；读不到=0）——入上传账本作"中断后本地文件
+    /// 是否变过"的判据（变过则旧会话分片不可信，恢复时作废重传）。
+    pub mtime_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -224,11 +227,20 @@ pub async fn fs_walk(app: AppHandle, root_id: String, path: String) -> Result<Wa
                 continue;
             }
             if ft.is_dir() {
-                out.push(WalkEntry { name, rel_path: rel.clone(), is_dir: true, size: 0 });
+                out.push(WalkEntry { name, rel_path: rel.clone(), is_dir: true, size: 0, mtime_ms: 0 });
                 stack.push((de.path(), rel, depth + 1));
             } else {
-                let size = de.metadata().map(|m| m.len()).unwrap_or(0);
-                out.push(WalkEntry { name, rel_path: rel, is_dir: false, size });
+                let meta = de.metadata();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let mtime_ms = meta
+                    .and_then(|m| m.modified())
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                out.push(WalkEntry { name, rel_path: rel, is_dir: false, size, mtime_ms });
             }
         }
     }
@@ -901,6 +913,55 @@ pub async fn fs_file_hashes(
         out.push(h.unwrap_or(None));
     }
     Ok(out)
+}
+
+/// 绝对路径单文件 SHA-256（0.3.7 需求2 恢复对账辅助）：与 fs_file_hashes 同
+/// 流式算法；读失败/非常规文件返回 None。仅供服务端上传冲突后的"远端已相同"
+/// 判据使用——路径来自本机上传账本，非用户任意输入面。
+pub async fn sha256_abs(path: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let p = path.to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut f = fs::File::open(&p).ok()?;
+        if !f.metadata().ok()?.is_file() {
+            return None;
+        }
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buf[..n]),
+                Err(_) => return None,
+            }
+        }
+        Some(hex_encode(&hasher.finalize()))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// 批量本地文件修改时间（0.3.7 需求2）：账本恢复时的"本地是否变过"判据
+/// （路径同样来自本机账本；stat 只读元数据，读不到=None→调用方按未知保守处理）。
+#[tauri::command]
+pub async fn fs_mtimes(app: AppHandle, paths: Vec<String>) -> Result<Vec<Option<i64>>, String> {
+    let _ = app;
+    Ok(paths
+        .iter()
+        .map(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.is_file())
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0)
+                })
+        })
+        .collect())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

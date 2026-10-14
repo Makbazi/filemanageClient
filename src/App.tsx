@@ -357,6 +357,17 @@ export default function App() {
     };
   }, []);
 
+  // 0.3.7 需求2：账本组恢复续跑（TransfersView [继续] → resumeJournalGroup 入队）
+  // 后补挂终态监听——旧实现 watchGroup 只挂在原始入队路径，恢复的组跑完静默无感。
+  useEffect(() => {
+    const h = (ev: Event) => {
+      const d = (ev as CustomEvent<{ gid?: string; label?: string }>).detail;
+      if (d?.gid) watchGroup(d.gid, d.label || "目录上传");
+    };
+    window.addEventListener("fm-group-resumed", h);
+    return () => window.removeEventListener("fm-group-resumed", h);
+  }, [watchGroup]);
+
   useEffect(() => {
     if (!restored.current) return;
     if (view === "files") refresh();
@@ -401,8 +412,10 @@ export default function App() {
 
   // ---------- 来源切换（需求10：主界面快速切换） ----------
 
-  async function pickLocalRoot(id: string) {
-    setView("files");
+  /** stay=true：切换后保持当前视图不跳回文件页（0.3.7 需求6——设置页内切换
+   *  数据源时用户正停留在本页，切完必须仍在设置页）。 */
+  async function pickLocalRoot(id: string, stay = false) {
+    if (!stay) setView("files");
     await setActive({ kind: "local", rootId: id });
   }
 
@@ -420,15 +433,16 @@ export default function App() {
     void pickLocalRoot(last);
   }
 
-  /** 切换服务端：未登录也允许（游客只读浏览，需求6）。 */
-  async function pickServer(id: string) {
+  /** 切换服务端：未登录也允许（游客只读浏览，需求6）。
+   *  stay=true 切换后保持当前视图（0.3.7 需求6：设置页内切换不退出设置）。 */
+  async function pickServer(id: string, stay = false) {
     const c = api.getConfig();
     const s = c.servers.find((x) => x.id === id);
     if (!s) return;
     try {
       const rs = await api.fetchRoots(id);
       setRoots(rs ?? []);
-      setView("files");
+      if (!stay) setView("files");
       const keepRoot = api.active().kind === "server" && api.active().serverId === id ? api.active().rootId : "";
       await setActive({ kind: "server", serverId: id, rootId: keepRoot || rs?.[0]?.id || "" });
       // 需求10：记住"选中的远程"，本地模式下快速切换第二按钮指向它
@@ -693,7 +707,7 @@ export default function App() {
       const srvName = cfg?.servers.find((s) => s.id === t.serverId)?.name ?? t.serverId;
       let plan: { children: GroupChildSpec[]; skipped: number } | null = null;
       try {
-        plan = await planDirUpload(t, srvName, entry.name, dirAbs, files);
+        plan = await planDirUpload(t, srvName, entry.path, entry.name, dirAbs, files);
       } catch (e) {
         if (isMissingEndpoint(e)) {
           plan = null; // 旧服务端无 /check：不预检，走 0.2.0 原流程
@@ -714,6 +728,7 @@ export default function App() {
             size: f.size,
             baseHash: "-",
             journalRel: f.relPath,
+            mtimeMs: f.mtimeMs,
           })),
           skipped: 0,
         };
@@ -749,7 +764,10 @@ export default function App() {
             localPath: c.localPath,
             remotePath: c.remotePath,
             size: c.size,
-            mtimeMs: 0,
+            // 0.3.7 需求2：内容证据入账本（mtime 恒有；sha 仅 pass2 哈希命中者）——
+            // 恢复对账的"本地是否变过/远端是否已同"判据来源
+            mtimeMs: c.mtimeMs ?? 0,
+            sha: c.sha ?? undefined,
           })),
         });
       } catch {
@@ -777,13 +795,17 @@ export default function App() {
     }
   }
 
-  /** 目录重传预检（0.3.2）：两遍 /check + 差异弹窗；产出实际入队子任务与跳过数。 */
+  /** 目录重传预检（0.3.2）：两遍 /check + 差异弹窗；产出实际入队子任务与跳过数。
+   *  0.3.7 需求2：①pass2 哈希的相对路径改为**根相对**（dirRel/relPath——旧实现
+   *  按遍历目录相对解析，全部 miss 成 null，pass2 实际从未生效，unknown 判定
+   *  长期空转）；②子任务随带 mtimeMs/sha 内容证据入账本，恢复对账有判据。 */
   async function planDirUpload(
     t: { serverId: string; rootId: string },
     srvName: string,
     dirName: string,
     dirAbs: string,
-    files: { name: string; relPath: string; size: number }[]
+    dirRel: string,
+    files: { name: string; relPath: string; size: number; mtimeMs: number }[]
   ): Promise<{ children: GroupChildSpec[]; skipped: number }> {
     const remoteOf = (rel: string) => `${dirName}/${rel}`;
     const localOf = (rel: string) => `${dirAbs}/${rel}`;
@@ -793,16 +815,20 @@ export default function App() {
     // pass2：size 相符但无哈希证据（unknown）的条目——算本地 SHA-256 复查
     const unknowns = files.filter((f) => st1.get(remoteOf(f.relPath)) === "unknown");
     const st2 = new Map<string, CheckState>();
+    const shaOf = new Map<string, string>();
     if (unknowns.length > 0) {
       const hashes = (await invoke<(string | null)[]>("fs_file_hashes", {
         rootId: api.active().rootId,
-        rels: unknowns.map((f) => f.relPath),
+        // fs_file_hashes 按**根相对**路径解析：被遍历目录自身要计入 rel（旧缺陷修复）
+        rels: unknowns.map((f) => (dirRel ? `${dirRel}/${f.relPath}` : f.relPath)),
       })) as (string | null)[];
       const withHash: { path: string; size: number; hash?: string }[] = [];
       unknowns.forEach((f, i) => {
         const h = hashes[i];
-        if (h) withHash.push({ path: remoteOf(f.relPath), size: f.size, hash: h });
-        else st2.set(remoteOf(f.relPath), "unknown"); // 本地读不到：保守按 unknown→覆盖上传
+        if (h) {
+          withHash.push({ path: remoteOf(f.relPath), size: f.size, hash: h });
+          shaOf.set(f.relPath, h);
+        } else st2.set(remoteOf(f.relPath), "unknown"); // 本地读不到：保守按 unknown→覆盖上传
       });
       if (withHash.length > 0) {
         const r2 = await serverCheck(t.serverId, t.rootId, withHash);
@@ -810,7 +836,7 @@ export default function App() {
       }
     }
     const children: GroupChildSpec[] = [];
-    const differ: { rel: string; name: string; size: number }[] = [];
+    const differ: { rel: string; name: string; size: number; mtimeMs: number }[] = [];
     let skipped = 0;
     for (const f of files) {
       const rp = remoteOf(f.relPath);
@@ -820,15 +846,15 @@ export default function App() {
           skipped++; // 相同自动跳过（用户决策）
           break;
         case "missing":
-          children.push({ name: f.name, remotePath: rp, localPath: localOf(f.relPath), size: f.size, baseHash: "-", journalRel: f.relPath });
+          children.push({ name: f.name, remotePath: rp, localPath: localOf(f.relPath), size: f.size, baseHash: "-", journalRel: f.relPath, mtimeMs: f.mtimeMs, sha: shaOf.get(f.relPath) });
           break;
         case "unknown":
           // 大小相符但无法断定内容（存量文件无哈希记录等）→ 覆盖语义上传：
           // baseHash "" 跳乐观校验，服务端覆盖前仍存版本（需求3 兜底）。
-          children.push({ name: f.name, remotePath: rp, localPath: localOf(f.relPath), size: f.size, baseHash: "", journalRel: f.relPath });
+          children.push({ name: f.name, remotePath: rp, localPath: localOf(f.relPath), size: f.size, baseHash: "", journalRel: f.relPath, mtimeMs: f.mtimeMs, sha: shaOf.get(f.relPath) });
           break;
         default:
-          differ.push({ rel: f.relPath, name: f.name, size: f.size });
+          differ.push({ rel: f.relPath, name: f.name, size: f.size, mtimeMs: f.mtimeMs });
       }
     }
     if (differ.length > 0) {
@@ -839,7 +865,7 @@ export default function App() {
           skipped++;
           continue;
         }
-        children.push({ name: f.name, remotePath: remoteOf(f.rel), localPath: localOf(f.rel), size: f.size, baseHash: "", journalRel: f.rel });
+        children.push({ name: f.name, remotePath: remoteOf(f.rel), localPath: localOf(f.rel), size: f.size, baseHash: "", journalRel: f.rel, mtimeMs: f.mtimeMs, sha: shaOf.get(f.rel) });
       }
     }
     return { children, skipped };
@@ -1131,6 +1157,13 @@ export default function App() {
               await refresh();
             }}
             onLogin={(id) => setDialog({ kind: "login", serverId: id, from: "settings" })}
+            onSwitchSource={async (target) => {
+              // 0.3.7 需求6：设置页内切换数据源，切完仍停留本页（stay=true）。
+              // 未登录服务端以游客身份切换（登录走「服务端」页签按钮/弹出的登录框）。
+              if (target.kind === "local") await pickLocalRoot(target.rootId, true);
+              else await pickServer(target.serverId, true);
+              await refresh();
+            }}
           />
         )}
 

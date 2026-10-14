@@ -157,6 +157,8 @@ export interface WalkEntry {
   relPath: string;
   isDir: boolean;
   size: number;
+  /** 0.3.7 需求2：修改时间毫秒（目录/读不到=0）——上传账本内容证据 */
+  mtimeMs: number;
 }
 
 export interface WalkResult {

@@ -196,6 +196,8 @@ pub fn run() {
             localfs::fs_thumb,
             // 0.3.2：目录重传校验（本地哈希）+ 缓存体系（字节读/用量/清空）
             localfs::fs_file_hashes,
+            // 0.3.7 需求2：账本恢复对账（本地 mtime 判据）
+            localfs::fs_mtimes,
             cachemgr::media_read_bytes,
             cachemgr::cache_stats,
             cachemgr::cache_clear,
@@ -205,6 +207,8 @@ pub fn run() {
             localdb::lg_list_pending,
             localdb::lg_group_items,
             localdb::lg_group_status,
+            // 0.3.7 需求2：恢复对账落条目终态（会话 completed//check same → done）
+            localdb::lg_item_state,
             // 本地版本管理（需求13）
             localfs::fs_versions_list,
             localfs::fs_versions_rollback,
@@ -228,6 +232,12 @@ pub fn run() {
             player::ffmpeg_playable,
             // 0.3.6：视频编码探测（H.265 自动转码编排；ffmpeg -i 窥首轨编码）
             player::video_codec_probe,
+            // 0.3.7 需求1：转码取消（作业注册表 + 进度事件配套 fm-ffmpeg）
+            player::ffmpeg_cancel,
+            // 0.3.7 需求3 第 4 档：ffmpeg 解码+原生渲染（媒体信息/逐帧解码/音轨提取）
+            player::video_media_info,
+            player::ffmpeg_frame,
+            player::ffmpeg_audio_track,
             // 记住的服务端账户密码（需求3）
             serverapi::cred_take,
             serverapi::cred_forget,
@@ -243,6 +253,9 @@ pub fn run() {
             // 登录凭证——"客户端退出即需重新登录"由下一次启动的自动重登承接；
             // 异常退出走不到这里，由服务端闲置 1h 滑动过期兜底。
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                // 0.3.7 需求1：先杀全部在飞 ffmpeg 转码作业再登出——异常拆栈场景
+                // 由 kill_on_drop 兜底，退出钩子保证不留跨会话孤儿进程续写产物。
+                player::ffmpeg_cancel_all(app);
                 serverapi::logout_all_for_exit(app);
             }
         });

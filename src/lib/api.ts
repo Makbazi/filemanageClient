@@ -199,6 +199,30 @@ export async function videoCodecProbe(path: string): Promise<string> {
   return invoke("video_codec_probe", { path }) as Promise<string>;
 }
 
+/** 0.3.7 需求1：媒体缓存视频 → {codec, duration(秒，0=未知), audio(有无音轨)}
+ *  （一次 `ffmpeg -i` 窥探、正向缓存；渲染档时间轴与转码进度分母同源）。 */
+export async function videoMediaInfo(path: string): Promise<{ codec: string; duration: number; audio: boolean }> {
+  return invoke("video_media_info", { path }) as Promise<{ codec: string; duration: number; audio: boolean }>;
+}
+
+/** 0.3.7 需求1：取消进行中的 ffmpeg 转码（Rust 侧 kill + 清 .part；无在飞作业幂等
+ *  静默成功）。进度经 "fm-ffmpeg" 事件透出（{key,path,status,secs,total,pct}）。 */
+export async function ffmpegCancel(path: string): Promise<void> {
+  await invoke("ffmpeg_cancel", { path });
+}
+
+/** 0.3.7 需求3 渲染档：按需解一帧 JPEG（不落盘；Rust 侧 0.25s 时间桶小缓存）。
+ *  返回 ArrayBuffer（同 media_read_bytes 通道纪律——CSP 零改动）。 */
+export async function ffmpegFrameBytes(path: string, time: number, maxh = 540): Promise<ArrayBuffer> {
+  return invoke("ffmpeg_frame", { path, time, maxh }) as Promise<ArrayBuffer>;
+}
+
+/** 0.3.7 需求3 渲染档：抽取音轨为媒体缓存内 `<key>.audio.m4a`（存在即复用）。
+ *  无音轨抛错 "无音轨"——调用侧退化内部时钟静音播放。 */
+export async function ffmpegAudioTrack(path: string): Promise<string> {
+  return invoke("ffmpeg_audio_track", { path }) as Promise<string>;
+}
+
 export function fetchRoots(serverId: string): Promise<ServerRoot[]> {
   return srvCall<ServerRoot[]>(serverId, "GET", "/api/v1/roots");
 }

@@ -497,6 +497,13 @@ pub fn lg_group_status(app: tauri::AppHandle, gid: String, status: String) -> Re
     with_db(&app, |c| journal_group_status(c, &gid, &status))
 }
 
+/// 0.3.7 需求2：恢复对账通道——TS 侧查得"服务端会话已 completed / /check 判同"
+/// 后把条目直接落终态（done 时组行 done_files 同步重算，与 Rust 内部写点同语义）。
+#[tauri::command]
+pub fn lg_item_state(app: tauri::AppHandle, gid: String, rel: String, state: String) -> Result<(), String> {
+    with_db(&app, |c| journal_item_state(c, &gid, &rel, &state))
+}
+
 // ---------- 整表读写（与旧版 JSON 整读整写语义 1:1） ----------
 
 pub fn load_descs(conn: &Connection) -> Vec<DescRecord> {

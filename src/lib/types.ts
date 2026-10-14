@@ -78,9 +78,11 @@ export interface UiConf {
   lastServerId?: string | null;
   /** 关闭按钮(X)行为（0.3.0 需求2，默认 tray：隐藏到托盘；quit：退出程序） */
   closeAction: "tray" | "quit";
-  /** 视频播放方式（0.3.0 需求1；0.3.3 增 ffmpeg 档。默认 system=WebView 系统解码器；
-   *  ffmpeg=经配置的 ffmpeg 转码 H.264 MP4 后窗口内播放；external=外部播放器） */
-  videoDecoder: "system" | "ffmpeg" | "external";
+  /** 视频播放方式（0.3.0 需求1；0.3.3 增 ffmpeg 档；0.3.7 需求3 四档定版。
+   *  默认 system=WebView 系统解码器；ffmpeg=经配置的 ffmpeg 转码 H.264 MP4 后
+   *  窗口内播放（产物复用）；render=ffmpeg 逐帧解码 + 前端 canvas 原生渲染
+   *  （不落盘产物、音轨单独提取对时）；external=外部播放器 */
+  videoDecoder: "system" | "ffmpeg" | "render" | "external";
   /** 外部播放器命令（0.3.0 需求1；空=系统关联播放器，支持 {file} 占位符） */
   videoPlayerCmd?: string | null;
   /** ffmpeg 可执行文件路径（0.3.3 需求3；空=PATH 自动探测 "ffmpeg"，不内嵌） */

@@ -316,14 +316,69 @@ export default function FileView(p: Props) {
   }, [p.viewMode, filtered, groups]);
 
   const selEntries = filtered.filter((e) => sel.has(e.path));
-  const toggle = (e: FsEntry, multi: boolean) => {
+
+  // 0.3.7 需求5：批量选择升级——复选框列（点框=增量勾选）、Ctrl/Cmd+点=加选、
+  // Shift+点=锚点到当前的连续范围选、Ctrl/Cmd+A=全选筛选结果、表头框=全选/清空。
+  // 选中集合按 path 存（与旧一致），故批量下载/复制/移动/删除等既有批量操作直接
+  // 复用 selEntries，无需改动 App 层操作实现。anchorRef 记录最近一次"非范围"选中
+  // 的条目下标（Shift 以它为起点）。
+  const anchorRef = useRef<number>(-1);
+  const selectAll = () => setSel(new Set(filtered.map((e) => e.path)));
+  const clearSel = () => {
+    setSel(new Set());
+    anchorRef.current = -1;
+  };
+  const toggleOne = (e: FsEntry) =>
     setSel((prev) => {
+      const n = new Set(prev);
+      const i = filtered.findIndex((x) => x.path === e.path);
+      if (n.has(e.path)) n.delete(e.path);
+      else n.add(e.path);
+      anchorRef.current = i;
+      return n;
+    });
+  // multi=加选(Ctrl)；shift=范围选；二者皆非=单选替换
+  const toggle = (e: FsEntry, multi: boolean, shift = false) => {
+    const i = filtered.findIndex((x) => x.path === e.path);
+    setSel((prev) => {
+      if (shift && anchorRef.current >= 0) {
+        const [a, b] = [Math.min(anchorRef.current, i), Math.max(anchorRef.current, i)];
+        const n = new Set(prev);
+        for (let k = a; k <= b && k < filtered.length; k++) n.add(filtered[k].path);
+        return n;
+      }
       const n = new Set(multi ? prev : []);
       if (n.has(e.path)) n.delete(e.path);
       else n.add(e.path);
+      anchorRef.current = i;
       return n;
     });
   };
+
+  // 表头复选框三态（全选/半选/未选）
+  const headCbRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!headCbRef.current) return;
+    const n = filtered.length;
+    const s = filtered.filter((e) => sel.has(e.path)).length;
+    headCbRef.current.checked = n > 0 && s === n;
+    headCbRef.current.indeterminate = s > 0 && s < n;
+  }, [sel, filtered]);
+
+  // Ctrl/Cmd+A 全选（仅当焦点不在输入框——避免抢走文本框全选）
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (!(ev.ctrlKey || ev.metaKey) || ev.key.toLowerCase() !== "a") return;
+      const t = ev.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (document.querySelector(".modal-mask, .ctx-menu, .viewer")) return;
+      ev.preventDefault();
+      selectAll();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered]);
 
   const crumbs = dirParts(p.path);
   const readOnly = p.anonymous;
@@ -378,7 +433,17 @@ export default function FileView(p: Props) {
     <table className="table" onClick={(ev) => ev.stopPropagation()}>
       <thead>
         <tr>
-          <th style={{ width: "42%" }}>名称</th>
+          {/* 0.3.7 需求5：复选框列——表头三态全选/清空 */}
+          <th style={{ width: 30 }}>
+            <input
+              ref={headCbRef}
+              type="checkbox"
+              className="row-check"
+              title="全选/清空本列筛选结果"
+              onChange={() => (headCbRef.current?.checked ? selectAll() : clearSel())}
+            />
+          </th>
+          <th style={{ width: "40%" }}>名称</th>
           <th>大小</th>
           <th>修改时间</th>
           <th style={{ width: 170 }}>操作</th>
@@ -389,7 +454,7 @@ export default function FileView(p: Props) {
           <tr
             key={e.path}
             className={sel.has(e.path) ? "row selected" : "row"}
-            onClick={(ev) => toggle(e, ev.ctrlKey || ev.metaKey)}
+            onClick={(ev) => toggle(e, ev.ctrlKey || ev.metaKey, ev.shiftKey)}
             onDoubleClick={() => p.onOpen(e)}
             onContextMenu={(ev) => {
               if (!p.onCtxEntry) return;
@@ -398,12 +463,22 @@ export default function FileView(p: Props) {
             }}
             title={
               e.isDir
-                ? "双击打开；Ctrl+单击多选；右键菜单"
+                ? "双击打开；单击选择，Shift+单击范围选，Ctrl+单击加选；右键菜单"
                 : viewableType(e)
-                  ? "双击查看；Ctrl+单击多选；右键菜单"
-                  : "双击预览；Ctrl+单击多选；右键菜单"
+                  ? "双击查看；单击选择，Shift+单击范围选，Ctrl+单击加选；右键菜单"
+                  : "双击预览；单击选择，Shift+单击范围选，Ctrl+单击加选；右键菜单"
             }
           >
+            <td>
+              <input
+                type="checkbox"
+                className="row-check"
+                checked={sel.has(e.path)}
+                onClick={(ev) => ev.stopPropagation()}
+                onChange={() => toggleOne(e)}
+                title="勾选加入批量选择"
+              />
+            </td>
             <td className="cell-name">
               <span className={`ficon k-${e.kind}`}>{kindIcon(e.kind)}</span>
               <span className="fname">{e.name}</span>
@@ -458,6 +533,18 @@ export default function FileView(p: Props) {
         <button className="btn" disabled={readOnly || !selEntries.length} title={roTip} onClick={() => p.onCopyMove(selEntries, "move")}>
           <IconMove size={15} /> 移动
         </button>
+        {/* 0.3.7 需求5：批量选择状态条——选中数一目了然，可整体取消 */}
+        {selEntries.length > 0 && (
+          <span className="sel-count">
+            已选 <b>{selEntries.length}</b> 项
+            <button className="btn small" title="Ctrl+A 全选筛选结果" onClick={selectAll}>
+              全选
+            </button>
+            <button className="btn small" onClick={clearSel}>
+              取消选择
+            </button>
+          </span>
+        )}
         <div className="spacer" />
         {p.caps.acl && !readOnly && (
           <button className="btn" title="当前目录权限与分享设置" onClick={() => p.onAcl(null)}>

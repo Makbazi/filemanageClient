@@ -1698,6 +1698,66 @@ input[type="radio"] {
   color: var(--text);
 }
 
+/* ---------- 0.3.7 需求6：设置页数据源切换下拉（页签行之上常驻） ---------- */
+.source-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card-bg);
+}
+.source-switch label {
+  font-size: 13px;
+}
+.source-switch select {
+  min-width: 220px;
+}
+.source-switch .tip {
+  font-size: 12px;
+}
+
+/* ---------- 0.3.7 需求5：批量选择（复选框列/网格勾选/选择计数条） ---------- */
+.row-check {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+  vertical-align: middle;
+}
+.grid-check {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.grid-item:hover .grid-check,
+.grid-item.selected .grid-check {
+  opacity: 1;
+}
+.sel-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.sel-count b {
+  color: var(--accent-text);
+}
+
 /* ---------- 0.3.2 目录重传差异询问对话框 ---------- */
 .diff-list {
   max-height: 300px;

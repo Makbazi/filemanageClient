@@ -776,12 +776,27 @@ pub async fn srv_upload(
         _ => None,
     };
     let flag = register_cancel(&transfer_id);
-    let result = upload_inner(
+    let mut result = upload_inner(
         &app, &server_id, &root_id, &rel, &local_path, &transfer_id, &file_name,
         size, base_hash, limit, &flag, journal,
     )
     .await;
     unregister_cancel(&transfer_id);
+    // 0.3.7 需求2（恢复对账主修复）：409 冲突最常见成因是"上一次被中断的传输
+    // 其实已在服务端合并成功，只是响应/账本没落"——条目仍 pending，续传重新
+    // 上传后撞"目标已存在≠断言"死冲突（用户感知=无法恢复）。冲突发生后取本地
+    // SHA-256 与远端当前 content_hash 比对：**相同=直接判成功**（账本经下方 Ok
+    // 分支落 done，不再空转重试）；不同/取不到=维持冲突（组"重试"走覆盖语义，
+    // 服务端覆盖前存版本）。upload_inner 已在冲突时作废会话，后续重试不再死循环。
+    if let Err(e) = &result {
+        if e.starts_with("FM_CONFLICT:") {
+            if let Some(local) = crate::localfs::sha256_abs(&local_path).await {
+                if remote_stat_hash(&app, &server_id, &root_id, &rel).await.as_deref() == Some(local.as_str()) {
+                    result = Ok(json!({ "ok": true, "reconciled": true, "path": rel.clone() }));
+                }
+            }
+        }
+    }
     match &result {
         Ok(_) => {
             journal_write(&app, journal, |db, g, r| {
@@ -988,7 +1003,51 @@ async fn upload_inner(
     }
 
     // 3) 完成合并（服务端做哈希校验、BaseHash 并发校验、版本快照、原子替换）
-    complete_with_polling(app, server_id, &session_id).await
+    let res = complete_with_polling(app, server_id, &session_id).await;
+    // 0.3.7 需求2：409 冲突=断言不符（典型：中断那次的响应没收到/账本没落，远端
+    // 其实已合并成功）。**先作废本会话**再上抛——旧实现留着 uploading 旧会话，
+    // 服务端 CreateOrResume 按路径命中它会原样带回过期 BaseHash，此后每次重试
+    // 都撞同一 409 永久死循环（要等 7 天僵尸清理）。作废后重试必然新建会话、
+    // 带当次 baseHash，冲突语义恢复可解。
+    if let Err(e) = &res {
+        if e.starts_with("FM_CONFLICT:") {
+            abort_session(app, server_id, &session_id).await;
+        }
+    }
+    res
+}
+
+/// 远端文件当前 content_hash（0.3.7 需求2 冲突对账用）；取不到（不存在/无哈希
+/// 记录/权限）返回 None。查询串手工转义（账本路径可含空格/中文/加号）。
+async fn remote_stat_hash(app: &AppHandle, server_id: &str, root_id: &str, rel: &str) -> Option<String> {
+    let v = srv_call(
+        app.clone(),
+        server_id.to_string(),
+        "GET".into(),
+        format!("/api/v1/stat?rootId={}&path={}", enc_q(root_id), enc_q(rel)),
+        None,
+    )
+    .await
+    .ok()?;
+    v.get("hash")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+}
+
+/// URL 查询串百分号转义（unreserved 之外全编；'/' 也编——path 值语义是查询参数，
+/// 交由服务端解码回原路径）。
+fn enc_q(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 fn chunk_bytes(index: u64, size: u64, chunk_size: u64) -> u64 {
