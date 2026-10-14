@@ -20,12 +20,20 @@ src/App.tsx            根组件：状态编排、对话框调度（Dialog 判�
                        （viewing 状态，0.1.7）、位置恢复；0.3.5 loginEpoch 计数并入
                        列表 effect 依赖、fm-config-changed 时 +1（修复服务端重启后
                        重新登录须手点刷新才出文件——登录路径保持同 rootId/path 时
-                       effect 依赖零翻动的死角；稳定原始值，不违反约定 4）
+                       effect 依赖零翻动的死角；稳定原始值，不违反约定 4）；
+                       0.3.7：需求6 pickServer/pickLocalRoot 增 stay 形参（设置页 onSwitchSource
+                       切数据源保持 view=settings）+ fm-group-resumed 监听（恢复的账本组补挂
+                       watchGroup 终态通知）；需求2 planDirUpload 修 fs_file_hashes 根相对路径
+                       组合（dirRel/rel——旧实现全 miss 空转）+ children 随带 mtimeMs/sha 入账本
+                       证据；需求5 无 App 改动（批量操作作用于既有 selEntries 链路）
 src/lib/
   datasource.ts        DataSource 接口（唯一数据访问契约）
   local.ts             本地实现（invoke fs_* 命令）
   server.ts            服务端实现（srv_call + srv_* 传输命令；0.2.0 serverMkdirs 批量建目录+旧服务端退化逐个 mkdir；0.3.2 serverCheck 目录重传预检（500/批，旧服务端 isMissingEndpoint 退化）；thumbPath 契约：null=永久无图、抛错=瞬时重试；0.3.3 收紧：413/415/403=永久 null（不整文件兜底不空转重试）、size_hint 移除、404 旧管线仅 Server ≤0.2.0 且静默；0.3.5 修订：415 不再判 null（服务端像素闸门≠无图）→Rust 落旧管线本地缩放，null 仅剩 413/403/真无图；**0.3.6 定版（浏览零整文件）：415/404/413/403 一律永久 null=图标，任何情况不再整文件兜底——全量字节只在双击查看/下载到来**）
   api.ts               配置单例(loadConfig/saveConfig/active) + source() 工厂 + 分享/ACL/AI 辅助
+                       + 视频辅助（ffmpegProbe/ffmpegPlayable/videoCodecProbe；0.3.7 增
+                       ffmpegCancel/videoMediaInfo/ffmpegFrameBytes(canvas 帧字节 ArrayBuffer)/
+                       ffmpegAudioTrack）
   transfer.ts          任务注册表（入队/暂停/续传/重试 + "fm-transfer" 事件归并，
                        未入队 transferId 首个事件自动注册为展示任务）+ 订阅；
                        0.2.0 目录上传组任务（enqueueGroup 子任务不进 order/并发池 3/
@@ -33,7 +41,13 @@ src/lib/
                        0.3.2 FM_* 前缀错误路由、组终态落上传账本（syncGroupDb 去抖）、
                        resumeJournalGroup/abandonJournalGroup/listJournalPending 重启续传 API；
                        0.3.5 dismissFromPanel(id)——仅右下角面板隐藏终态行（panelHidden 展示标记，
-                       注册表与 TransfersView 不动；run() 回到运行态自动清除）
+                       注册表与 TransfersView 不动；run() 回到运行态自动清除）；
+                       **0.3.7 需求2 resumeJournalGroup 恢复对账大修**：重入队前①条目会话
+                       GET /upload/session 判 completed→落账 done（免重传，旧盲目重传撞 409
+                       永久死循环=本批根因）②批量 POST /check 判 same→落账 done（旧服务端静默
+                       跳过）③账本 mtime 与当前不符=本地变过→DELETE 旧会话防分片混拼、覆盖语义
+                       全新重传④failed/不可续会话→覆盖语义；恢复入队后广播 fm-group-resumed
+                       事件（App 补挂 watchGroup 终态监听）
   transtypes.ts        TransferTask/TransferStatus 共享契约（状态串 = Rust 事件；
                        0.3.2 +skipped 组行跳过计数、+journalRel 账本 rel 坐标；
                        0.3.5 +panelHidden 右下角面板逐条隐藏标记（纯展示，不删任务））
@@ -93,6 +107,16 @@ src/components/        Sidebar Topbar FileView FileGrid SearchView TrashView Tra
                        （IconTransfer+任务数角标，同层 z=150），纯展示态不影响队列；
                        0.3.5 面板终态行（完成/已取消/失败）逐条"从面板隐藏"按钮=
                        panelHidden 标记（仅移出右下角，TransfersView 保留；再运行自动回面板））
+                       （0.3.7 需求5：FileView 复选框列（表头三态全选/清空）+ Shift+单击范围选 +
+                       Ctrl/Cmd+A 全选筛选结果 + "已选 N 项[全选][取消选择]"状态条；FileGrid 卡片
+                       左上角勾选框；批量下载/复制/移动/删除复用既有 selEntries 链路，重命名保持单选。
+                       需求6：Settings 页签之上常驻"当前数据源"下拉（本地·各目录/服务端N·各名称
+                       （已登录/游客）），选择即经 App onSwitchSource(stay=true) 切换、停留本页不跳
+                       文件列表）
+                       （0.3.7 需求1/3：FileViewer 转码面板带进度条+百分比+耗时/总时长+取消按钮，
+                       "转码已取消"走中性 ffmNote 不再冒充失败；新增 FfmRenderView 组件——render 档
+                       逐帧解码 canvas 播放（播放/暂停/拖拽进度条/时间显示，音轨经 audio 对时或
+                       无音轨内部时钟，外部播放器兜底入口））
 src/styles/            base.css（组件）+ themes.css（5 套主题变量）
 src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/player/cachemgr 的 command 注册 +
                        启动清理；0.3.0：TrayIconBuilder 托盘（菜单=显示主窗口/退出，左键仅唤醒——
@@ -102,9 +126,10 @@ src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/p
                        0.3.2：setup 中 journal_prune（账本终态超 7 天回收）+ cachemgr::init_counter/
                        启动一次 enforce/300s 巡检任务；新注册 fs_file_hashes、media_read_bytes、
                        cache_stats、cache_clear、lg_new_group/lg_set_children/lg_list_pending/
-                       lg_group_items/lg_group_status；0.3.3 注册 ffmpeg_probe/ffmpeg_playable；0.3.6 注册 video_codec_probe，run 改 build()+回调挂 `RunEvent::ExitRequested`→`logout_all_for_exit`（正常退出前尽力登出全部服务端凭证）)
+                       lg_group_items/lg_group_status；0.3.3 注册 ffmpeg_probe/ffmpeg_playable；0.3.6 注册 video_codec_probe，run 改 build()+回调挂 `RunEvent::ExitRequested`→`logout_all_for_exit`（正常退出前尽力登出全部服务端凭证）；
+                       0.3.7 注册 ffmpeg_cancel/video_media_info/ffmpeg_frame/ffmpeg_audio_track/fs_mtimes/lg_item_state，ExitRequested 钩子先 `player::ffmpeg_cancel_all` 杀全部在飞转码再登出（不留孤儿 ffmpeg 跨会话续写产物）)
                        config.rs(AppConfig: localRoots/servers(caFile)/ai/active/clientId(0.3.6：客户端唯一标识——首启 Uuid::new_v4 生成并持久化，save_config 中同 token 般 Rust 权威、绝不被前端快照清空；进程内 OnceLock 供 HTTP 层读取)/ui(sidebarCollapsed/
-                                  closeAction=tray|quit(默认tray)/videoDecoder=system|ffmpeg|external(默认system;0.3.3 增 ffmpeg 档)/
+                                  closeAction=tray|quit(默认tray)/videoDecoder=system|ffmpeg|render|external(默认system;0.3.3 增 ffmpeg 档;0.3.7 需求3 增 render 档=ffmpeg 逐帧解码+canvas 原生渲染)/
                                   videoPlayerCmd(0.3.0)/ffmpegPath(0.3.3，空=PATH 探测 ffmpeg))/transfer/trashRetentionDays；keyring_ok；
                                   update() 统一做令牌同步凭证库+config.json 脱敏；0.3.6：ServerConf.refreshToken 字段删除（单凭证契约；旧 config.json 该键加载即忽略）；
                                   0.3.2 cache{maxDiskMb=10240(10GB),maxMemMb=2048(2GB)} serde default)
@@ -116,9 +141,14 @@ src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/p
                                   组（gid=组任务 id/服务端/根/本地目录/前缀/status/done_files）与
                                   条目（rel/本地远端路径/size/sha/session_id/state）；Rust
                                   upload_inner 回写会话与终态（Mutex 短事务禁跨 await），
-                                  journal_prune 启动回收终态超 7 天组)
+                                  journal_prune 启动回收终态超 7 天组；
+                                  0.3.7 lg_item_state 命令——TS 恢复对账直接落条目终态（done 时
+                                  组行 done_files 同步重算））
                        localfs.rs(防逃逸 fs_* + 本地版本库 + kind_of(0.3.0 视频扩展表扩 hevc/h265/h264/
-                                  m2ts/mpg…，不含 ts)+ fs_import/export + fs_walk(0.2.0 目录树枚举，需求41) +
+                                  m2ts/mpg…，不含 ts)+ fs_import/export + fs_walk(0.2.0 目录树枚举，需求41；
+                                  0.3.7 WalkEntry+mtime_ms 作账本证据)+ fs_mtimes(0.3.7 批量本地 mtime，
+                                  恢复"本地是否变过"判据)+ sha256_abs(0.3.7 冲突对账本地哈希辅助，路径来自
+                                  本机账本非用户输入面) +
                                   fs_media_cache(0.1.7 起带可选 ver 版本串入缓存键；0.2.1 RAW 存提取的内嵌预览 .jpg；
                                   0.3.2 hard_link 命中不 touch（保源文件 mtime）、新条目登记 cachemgr) +
                                   fs_thumb(0.2.1 网格缩略图：媒体缓存 ≤512px .thumb.jpg 路径；0.3.3 契约对齐 srv_thumb：解不了且 >8MiB 由 Err 改 Ok(None) 永久图标) +
@@ -133,7 +163,12 @@ src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/p
                                   GET /upload/session(id=) 判 completed(5s 间隔≤15min)、取消(非暂停)
                                   尽力 DELETE /upload/session 清服务端 staging、错误加
                                   FM_PAUSE:/FM_CANCEL:/FM_CONFLICT:/FM_NET: 前缀(事件展示剥离)、
-                                  srv_upload 新增 journal_gid/journal_rel 参数回写上传账本)
+                                  srv_upload 新增 journal_gid/journal_rel 参数回写上传账本；
+                                  **0.3.7 需求2 冲突死循环根治**：upload_inner 的 complete 撞 409(FM_CONFLICT)
+                                  即 DELETE 会话再上抛（服务端 CreateOrResume 按路径命中旧会话会原样带回过期
+                                  BaseHash=旧"永久 409 无法恢复"根因）；srv_upload 冲突后经 localfs::sha256_abs
+                                  本地哈希与 GET /stat 远端 content_hash 比对——相同=上次中断其实已合并成功，
+                                  直接判成功落账 done（崩溃恢复主场景零重试闭环）；enc_q 查询串转义辅助）
                        thumb.rs(0.2.1 相机 RAW：is_raw_ext 品牌扩展表 + extract_preview 字节级最大内嵌 JPEG
                                   提取（SOI 扫描 + 段链校验至 EOI，熵数据/progressive 合法，垃圾候选拒绝）+
                                   ensure_thumb image 缩放 ≤512px JPEG 入媒体缓存)
@@ -146,7 +181,9 @@ src-tauri/src/         lib.rs(config/localdb/localfs/serverapi/ai/secret/thumb/p
                                   playable=guarded_cache_path 纵深内，容器 WebView 友好(mp4/m4v/mov/webm/m4a/mp3/ogg/ogv)且非
                                   force 原路返回，否则 tokio::process 起 ffmpeg 转 H.264/AAC MP4 落 <hash>.ffmpeg.mp4 入媒体缓存
                                   复用——存在即 touch、失败删半成品、stderr 按字符截尾、Windows 防闪窗、note_media_write 计 LRU、
-                                  零 fm-transfer；不内嵌 ffmpeg；**0.3.6** `video_codec_probe`/`probe_video_codec`：ffmpeg -i 解容器头取首条 `Video:` 编码名（=判不了；正向结果进程内缓存），`ffmpeg_playable` 容器直放短路前先探编码——HEVC/hvc1/hev1 必转码（修 HEVC-in-MP4 容器盲区）))
+                                  零 fm-transfer；不内嵌 ffmpeg；**0.3.6** `video_codec_probe`/`probe_video_codec`：ffmpeg -i 解容器头取首条 `Video:` 编码名（=判不了；正向结果进程内缓存），`ffmpeg_playable` 容器直放短路前先探编码——HEVC/hvc1/hev1 必转码（修 HEVC-in-MP4 容器盲区）；
+                                  **0.3.7 需求1 转码治理**：`ffmpeg_playable` 产物改 `.part` 暂存 + 成功 rename（修"半成品当成品复用→重开误报不可用"，旧 `metadata(len>0)` 复用即成品），`kill_on_drop(true)`+作业注册表（key→AtomicBool+Notify）+`ffmpeg_cancel`+每 key single-flight（对齐 MEDIA_FLIGHT）；`-progress pipe:1` 解析 out_time_ms→`fm-ffmpeg` 事件（{key,path,orig,status,secs,total,pct}，前端按 orig 过滤）；`probe_video_info` 一次窥探编码/时长/音轨（正向缓存）；`video_media_info` 供渲染档时间轴；
+                                  **0.3.7 需求3 第 4 档 render**：`ffmpeg_frame`（`-ss` 定位单帧 mjpeg 管道，不落盘，0.25s 桶小缓存，ipc::Response 原始字节）+`ffmpeg_audio_track`（抽 `<key>.audio.m4a`，`.part` 暂存同纪律，无音轨 Err"无音轨"→前端静音时钟）——逐帧解码+canvas 原生渲染，边解边播不等整段转码；仍零 fm-transfer）)
                        ai.rs(本地 AI)
                        cachemgr.rs(0.3.2 媒体/缩略图磁盘缓存 ≤cfg.cache.maxDiskMb LRU：
                                   touch-on-serve 仅限本进程自有拷贝（hard_link nlink 与源文件
@@ -242,7 +279,8 @@ cd src-tauri && cargo check
    webkitgtk 支持参差违背双引擎一致性）。类型判定必须走 `lib/preview.ts`
    `viewableType`，不得与弹窗支持集分叉。层叠契约：`.modal-mask` 100 >
    `.viewer-fs` 90 > `.viewer` 80 > 页面内容（401 登录框恒在查看之上）。
-   **视频解码（0.3.0 需求1；0.3.3 需求3 三档化）**：H.264/H.265 默认 `videoDecoder=system`——`<video>`
+   **视频解码（0.3.0 需求1；0.3.3 需求3 三档化；0.3.7 需求3 四档 system|ffmpeg|render|external，
+   转码治理+进度取消见 0.3.7 批注）**：H.264/H.265 默认 `videoDecoder=system`——`<video>`
    即 WebView 原生系统解码器（Windows Media Foundation / Linux GStreamer），必须挂
    `onError` → 提示面板（缺 HEVC 组件指引）+ [用 ffmpeg 转码播放]（force 转码，见下）+
    [用外部播放器打开]（`open_media` 开媒体缓存路径；`videoPlayerCmd` 空=系统关联播放器，
@@ -301,7 +339,7 @@ cd src-tauri && cargo check
 
 ## 当前版本
 
-0.3.6（单凭证认证收敛：登录只回 token/X-Client-Id 标识绑定/401 自动重登/退出登出/闲置 1h——配套 Server 0.2.4 破坏批 + 浏览零整文件：srv_thumb 废除 415/404 整文件兜底、FileView 慢通道移除 + H.265 修复：video_codec_probe 探真实编码、system 档 HEVC 自动转码/ffmpeg_playable 不再被容器后缀短路）+ 0.3.5（缩略图与稳定性修复批：415→本地缩放兜底【已被 0.3.6 取代】+ 视口优先调度/重入视口重武装 + 同键 single-flight + 面板逐条隐藏 + 重登自动刷新）+ 0.3.4（认证协议配套批：服务端去 JWT 后的凭证透明承接，客户端代码零改动 + 文档/版本号定版）+ 0.3.3（查看零传输 + 缩略图契约收紧 + ffmpeg 可配转码 + 传输面板显隐）+ 0.3.2（上传中断兜底 + 缩略图全显与双层缓存 + 浏览零下载）+ 0.3.1（win10 交叉编译环境修复：镜像补装 appindicator 开发包——纯 build-env 变更，产物代码/数据协议零变更）+ 0.3.0（H.264/H.265 视频播放体系 + 系统托盘常驻）+ 0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.4（本批认证契约所需）**；对 0.2.3/≤0.2.2 的降级面见 CHANGELOG 兼容矩阵行内说明。
+0.3.7（转码治理：`.part` 暂存+原子改名/kill_on_drop/作业注册表+ffmpeg_cancel/single-flight/`fm-ffmpeg` 进度事件（查看器与预览面板进度条+取消按钮，关窗即中断不留半成品——修"重开误报 ffmpeg 不可用"三根因）+ 四档播放（需求3：新增 render=ffmpeg 逐帧解码+canvas 原生渲染，`ffmpeg_frame`/`ffmpeg_audio_track`/FfmRenderView）+ 文件夹上传断点恢复（需求2：resumeJournalGroup 对账 completed/same/本地变更、Rust 冲突即作废会话+哈希判同落账、账本 mtime/sha 证据、fs_file_hashes 根相对路径修复、恢复组终态监听+侧栏角标）+ 批量选择（需求5：复选框列/Shift 范围/Ctrl+A/全选状态条）+ 设置页数据源下拉（需求6：stay 切换停留本页）+ Server 0.2.7 日志批配套，**数据协议零变更**——恢复所用端点全为既有面）+ 0.3.6（单凭证认证收敛：登录只回 token/X-Client-Id 标识绑定/401 自动重登/退出登出/闲置 1h——配套 Server 0.2.4 破坏批 + 浏览零整文件：srv_thumb 废除 415/404 整文件兜底、FileView 慢通道移除 + H.265 修复：video_codec_probe 探真实编码、system 档 HEVC 自动转码/ffmpeg_playable 不再被容器后缀短路）+ 0.3.5（缩略图与稳定性修复批：415→本地缩放兜底【已被 0.3.6 取代】+ 视口优先调度/重入视口重武装 + 同键 single-flight + 面板逐条隐藏 + 重登自动刷新）+ 0.3.4（认证协议配套批：服务端去 JWT 后的凭证透明承接，客户端代码零改动 + 文档/版本号定版）+ 0.3.3（查看零传输 + 缩略图契约收紧 + ffmpeg 可配转码 + 传输面板显隐）+ 0.3.2（上传中断兜底 + 缩略图全显与双层缓存 + 浏览零下载）+ 0.3.1（win10 交叉编译环境修复：镜像补装 appindicator 开发包——纯 build-env 变更，产物代码/数据协议零变更）+ 0.3.0（H.264/H.265 视频播放体系 + 系统托盘常驻）+ 0.2.1（网格缩略图全量显示 + 相机 RAW 查看/预览）+ 0.2.0（需求41 目录上传）；0.1.1/0.1.2 为构建体系批次、0.1.3–0.1.7 为修复与 UI 批次；配套 filemanageServer **0.2.7（推荐基线；对协议零依赖，全 0.2.x/0.1.x 兼容）**；对 0.2.4/0.2.3/≤0.2.2 的降级面见 CHANGELOG 兼容矩阵行内说明。
 **0.3.4（2026-10-10 用户第三批清单第 3 条；配 Server 0.2.3，客户端代码零改动）**：服务端认证重构去 JWT——登录/刷新响应中的 `token` 变为服务端三层认证图签发的**不透明随机凭证**（64-hex 随机哈希形态，不编码任何身份；真实 user id/username 存服务端）。客户端本就对凭证无格式假设（不解析、只 bearer_auth 透传、keyring 存取），**全链路零改动**：`refreshToken` 字段为同一凭证的兼容别名（token/refreshToken 同串），401→`try_refresh`→重试、logout、change-password、分享 st、keyring 存取语义全部不变；`/auth/me` 回显 `{id,username,role}` 账户页照常。升级 Server 0.2.3 后的一次性影响=存量会话失效、重登一次（既有 AUTH_REQUIRED 登录框路径承接，无新增面）。本批变更：三处版本源 0.3.3→0.3.4、serverapi.rs/secret.rs/config.rs 认证注释按不透明凭证改写（行为零变更）、设置"关于"配套服务端文案 0.2.x（推荐，当前 0.2.3）·0.1.x 可用。兼容矩阵：0.3.4 配 Server ≤0.2.2 亦无感（协议字段形状未变，凭证内容对客户端始终不透明）。
 **0.3.3（2026-10-06 用户清单 1–5 条；数据协议零变更，缩略图 BMP 对齐依赖 Server 0.2.2）**：需求原句——查看服务端视频触发了下载，查看服务端文件不得触发传输、上传下载只许手动触发；服务端按缩略图预览也要滚动到哪里哪里显示、向上向下缓存和本地目录机制保持一致；可在设置界面配置 ffmpeg 用于视频解码播放、默认系统解码但允许用户配置；右下角上传下载弹窗可关闭、按按钮可再弹出（显隐）；版本 0.3.3/0.2.2。实施——`download_inner` silent 化（media-<hash> 通道零事件，本批主修"看视频出下载行"；查看允许临时落盘进缓存的既定边界不变）；`srv_thumb`/`fs_thumb` 契约收紧（413/415/403=永久无图 null、不整文件兜底、size_hint 移除；视口 IO±2 屏/双层缓存本就双模共用，配 0.2.2 后服务端网格出图能力=本地机制：滚到哪出到哪）；`ui.videoDecoder` 三档 system|ffmpeg|external + `ui.ffmpegPath` + 新命令 `ffmpeg_probe`/`ffmpeg_playable`（H.264 MP4 转码入媒体缓存复用、零传输事件、不内嵌 ffmpeg、失败按面板提示走外部播放器兜底）；TransferPanel 头部隐藏↔右下角 .transfer-fab 圆钮显隐（会话内展示态，队列执行不受影响）。Cargo.toml tokio 增 `process` 特性；CSP/capabilities/`/api/v1` 协议零改动。三处版本源 0.3.2→0.3.3。
 **0.3.2（2026-10-06 用户清单 1–6 条；依赖 Server 0.2.1 加性端点，配 ≤0.2.0 逐条退化）**：需求原句——上传目录中途断连要修；中断后重传同一目录要相同文件校验+兜底（未完成恢复/碎片清理）；缩略图可见±2屏缓存、内存≤2GB、磁盘≤10GB、有清理更新机制；图片再多也要全量显示；打开服务端文件/文件夹不得触发下载（查看允许临时落盘纳入上限淘汰——维护者确认；磁盘缓存跨退出保留）。断连主根因与修复：**complete 被 srv_call 120s 总超时掐断→服务端已成功客户端报失败→重试撞 409 风暴**——complete 独立提交（stream client+15min）且断连后只轮询 `GET /upload/session` 判 completed 绝不重发；分片网络级重试（1/2/4s 退避≤3）；reqwest Client 按服务端复用+tcp_keepalive；坏会话（size 变）DELETE 重建；**取消即时 DELETE 会话清 staging**；FM_* 前缀错误路由。**目录重传预检**：`POST /check` 两遍（先 size，unknown 集 `fs_file_hashes` 补 SHA-256 复查）→ 相同自动跳过、同名不同内容 `uploadDiff` 弹窗逐行覆盖/跳过（覆盖 baseHash ""，服务端覆盖前存版本）→ 旧服务端 404 整体退化为 0.2.0 冲突语义。**上传账本**（localdb user_version 2 upload_groups/upload_items）：Rust 回写会话/终态，TransfersView"未完成的上传组 [继续][放弃]"重启续传（done 跳过、failed 覆盖语义、放弃逐 session DELETE），终态组 7 天启动回收。**缩略图体系**：IntersectionObserver（root=.page，rootMargin 上下 2 屏）驱动无上限优先级队列（废除 slice(0,60)；失败退避 2/8/30s ≤3 轮；键=来源标识+path@mtime；目录切换复位）；`srv_thumb` 优先服务端 `/thumb`（**浏览零下载**）；内存 `thumbcache.ts` blob LRU（`media_read_bytes` IPC ArrayBuffer；CSP/capabilities 零改动）；磁盘 `cachemgr.rs` ≤10GB mtime-LRU（hard_link 条目纪律/24h 孤儿回收/300s 巡检/设置页用量+清空）。新增直接依赖 sha2（锁内 0.10.9 提升，零新下载）。三处版本源 0.3.1→0.3.2。

@@ -7,7 +7,7 @@
 //   由一条组行聚合进度，并发池限流（默认 3），暂停/继续/取消/重试作用于整组。
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { ServerSource, srvCall } from "./server";
+import { ServerSource, srvCall, serverCheck } from "./server";
 import { getConfig } from "./api";
 import { uid } from "./types";
 import type { TransferTask } from "./transtypes";
@@ -248,6 +248,10 @@ export interface GroupChildSpec {
   baseHash?: string;
   /** 0.3.2：上传账本 rel_path（组任务 id=账本 gid；缺省=不入账） */
   journalRel?: string;
+  /** 0.3.7 需求2：账本内容证据——本地 mtime（毫秒）与已算出的 SHA-256
+   * （pass2 哈希命中者才有），恢复对账的判据来源 */
+  mtimeMs?: number;
+  sha?: string;
 }
 
 /** 入队一个目录上传组：子任务只进注册表（不进 order=不进 UI 快照），
@@ -445,8 +449,16 @@ export async function listJournalPending(): Promise<JournalGroupRow[]> {
   }
 }
 
-/** 继续一个未完成的账本组：同 gid 重建子任务入队（done 条目跳过；服务端会话
- *  仍在则自动断点续传，会话已废则全新开始——0.2.1 服务端命中坏会话会自建新会话）。 */
+/** 继续一个未完成的账本组（0.3.7 需求2 大修）：断点续传前先向服务端**对账**，
+ *  把"其实已合并成功、只是响应/账本没落"的条目直接落 done——旧实现盲目重传，
+ *  这些条目撞"目标已存在≠断言"409 且服务端 CreateOrResume 命中旧会话原样带回
+ *  过期 BaseHash，永久死循环（用户感知=无法恢复）。对账两步：
+ *   1) 有 session_id 的条目 GET /upload/session 查真实终态（completed→done、
+ *      aborted/404→清掉失效会话 id 走全新重传，不再让过期会话被路径命中复用）；
+ *   2) 其余非 done 条目批量 POST /check（有 sha 的带上做内容判同）——same→done。
+ *  配旧服务端（无 /check 端点）自动跳过对账，退化为 0.3.6 行为。
+ *  对账后仍入队的条目：failed 或"上次可能已远端生成"的置覆盖语义（baseHash ""），
+ *  真·新文件置 "-"。入队后同 transferId 复用会话断点。 */
 export async function resumeJournalGroup(g: JournalGroupRow): Promise<void> {
   let items: JournalItemRow[] = [];
   try {
@@ -454,11 +466,79 @@ export async function resumeJournalGroup(g: JournalGroupRow): Promise<void> {
   } catch {
     return;
   }
-  const todo = items.filter((i) => i.state !== "done" && i.state !== "canceled");
+  let todo = items.filter((i) => i.state !== "done" && i.state !== "canceled");
+
+  // —— 对账步骤 0：本地文件变过=旧会话分片不可信 ——
+  // 账本 mtime（0.3.7 起新组真实记录）与当前 mtime 不符 → 作废服务端会话，
+  // 全新覆盖重传（否则服务端路径命中旧会话、跳过已传分片 = 新旧内容混拼损坏）。
+  // 存量账本 mtime=0：以"当前 mtime 晚于组创建 60s+ 且有旧会话"作保守判据。
+  const changed = new Set<string>();
+  try {
+    const mt = await invoke<(number | null)[]>("fs_mtimes", { paths: todo.map((i) => i.localPath) });
+    todo.forEach((i, idx) => {
+      const cur = mt[idx];
+      if (cur == null) return;
+      const moved = i.mtimeMs > 0 ? cur !== i.mtimeMs : cur > g.createdAt + 60_000 && !!i.sessionId;
+      if (moved) changed.add(i.relPath);
+    });
+  } catch {
+    /* stat 通道不可用：跳过变更判定，行为退一步仍可恢复 */
+  }
+  for (const rel of changed) {
+    const i = todo.find((x) => x.relPath === rel);
+    if (i?.sessionId) {
+      await srvCall(g.serverId, "DELETE", `/api/v1/upload/session?id=${encodeURIComponent(i.sessionId)}`).catch(() => {});
+    }
+  }
+
+  // —— 对账步骤 1：会话真实终态 ——
+  const staleSessions: string[] = [];
+  const doneFromSession = new Set<string>();
+  for (const i of todo) {
+    if (!i.sessionId || changed.has(i.relPath)) continue; // 已作废的会话不再查
+    try {
+      const s = await srvCall<{ status?: string }>(g.serverId, "GET", `/api/v1/upload/session?id=${encodeURIComponent(i.sessionId)}`);
+      if (s?.status === "completed") doneFromSession.add(i.relPath);
+      else staleSessions.push(i.relPath); // aborted/其他非在传态：不可续，全新重传
+    } catch {
+      staleSessions.push(i.relPath); // 404/作废：同上
+    }
+  }
+  for (const rel of doneFromSession) {
+    await invoke("lg_item_state", { gid: g.gid, rel, state: "done" }).catch(() => {});
+  }
+  todo = todo.filter((i) => !doneFromSession.has(i.relPath));
   if (todo.length === 0) {
     await invoke("lg_group_status", { gid: g.gid, status: "done" }).catch(() => {});
     return;
   }
+
+  // —— 对账步骤 2：内容判同（/check，旧服务端/任何失败静默跳过——尽力对账，
+  // 判同只是加速器，失败绝不阻断恢复入口本身）——
+  const doneFromCheck = new Set<string>();
+  try {
+    const results = await serverCheck(
+      g.serverId,
+      g.rootId,
+      todo.map((i) => ({ path: i.remotePath, size: i.size, hash: i.sha || undefined }))
+    );
+    for (const r of results) {
+      if (r.state === "same") doneFromCheck.add(r.path);
+    }
+  } catch {
+    /* isMissingEndpoint（旧服务端）与其他错误同路径：跳过判同，照常重传 */
+  }
+  for (const rel of doneFromCheck) {
+    const item = todo.find((i) => i.remotePath === rel);
+    // 本地已变过的条目不落 done——判同结论基于旧账本证据，必须重传新内容
+    if (item && !changed.has(item.relPath)) await invoke("lg_item_state", { gid: g.gid, rel: item.relPath, state: "done" }).catch(() => {});
+  }
+  todo = todo.filter((i) => !doneFromCheck.has(i.remotePath) || changed.has(i.relPath));
+  if (todo.length === 0) {
+    await invoke("lg_group_status", { gid: g.gid, status: "done" }).catch(() => {});
+    return;
+  }
+
   groupDbStatus.set(g.gid, "active");
   enqueueGroup({
     id: g.gid,
@@ -470,13 +550,15 @@ export async function resumeJournalGroup(g: JournalGroupRow): Promise<void> {
       remotePath: i.remotePath,
       localPath: i.localPath,
       size: i.size,
-      // failed 可能因远端已存在（上次已完成但状态没落账）→ 覆盖语义（服务端
-      // 覆盖前存版本）；pending/paused 仍按新文件断言（会话命中自动续传，
-      // 未命中且真冲突时组"重试"仍可覆盖）。
-      baseHash: i.state === "failed" ? "" : "-",
+      // failed / 本地变过（会话已作废）/ 会话不可续 → 覆盖语义 ""（服务端覆盖前
+      // 存版本）；真·新文件 → "-"。对账已剔除"其实完成"的条目；若仍撞 409，
+      // Rust 侧冲突即作废会话 + 哈希对账落 done 双重兜底，不再永久死循环。
+      baseHash: i.state === "failed" || changed.has(i.relPath) || staleSessions.includes(i.relPath) ? "" : "-",
       journalRel: i.relPath,
     })),
   });
+  // App 侧接住续跑组挂终态监听（汇总通知 + 远端列表刷新）
+  window.dispatchEvent(new CustomEvent("fm-group-resumed", { detail: { gid: g.gid, label: g.label || g.remotePrefix } }));
 }
 
 /** 放弃一个未完成组：作废服务端残留会话（清 staging 碎片）+ 账本置 canceled。 */

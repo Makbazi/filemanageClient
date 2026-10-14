@@ -14,7 +14,8 @@ interface Props {
   thumbs: Record<string, string | null>;
   /** 可出缩略图条目的 tkey（viewableType==="image"），非图像返回 undefined */
   tkeyOf(e: FsEntry): string | undefined;
-  onToggle(e: FsEntry, multi: boolean): void;
+  /** 0.3.7 需求5：multi=Ctrl/Cmd 加选；shift=范围选 */
+  onToggle(e: FsEntry, multi: boolean, shift?: boolean): void;
   /** 双击=查看 */
   onOpen(e: FsEntry): void;
   /** 角标眼睛按钮=预览弹窗 */
@@ -36,15 +37,30 @@ export default function FileGrid(p: Props) {
             // IO 只观察带此属性的卡片；上下各 2 屏进入即排队出图）
             data-tkey={tk}
             className={p.sel.has(e.path) ? "grid-item selected" : "grid-item"}
-            onClick={(ev) => p.onToggle(e, ev.ctrlKey || ev.metaKey)}
+            onClick={(ev) => p.onToggle(e, ev.ctrlKey || ev.metaKey, ev.shiftKey)}
             onDoubleClick={() => p.onOpen(e)}
             onContextMenu={(ev) => {
               if (!p.onCtx) return;
               ev.preventDefault();
               p.onCtx(e, ev.clientX, ev.clientY);
             }}
-            title={e.isDir ? "双击打开；右键菜单" : viewableType(e) ? "双击查看；右键菜单" : "双击预览；右键菜单"}
+            title={
+              e.isDir
+                ? "双击打开；单击选择，Shift+单击范围选，Ctrl+单击加选；右键菜单"
+                : viewableType(e)
+                  ? "双击查看；单击选择，Shift+单击范围选，Ctrl+单击加选；右键菜单"
+                  : "双击预览；单击选择，Shift+单击范围选，Ctrl+单击加选；右键菜单"
+            }
           >
+            {/* 0.3.7 需求5：左上角勾选框（增量勾选，不触发单选替换） */}
+            <input
+              type="checkbox"
+              className="grid-check"
+              checked={p.sel.has(e.path)}
+              onClick={(ev) => ev.stopPropagation()}
+              onChange={() => p.onToggle(e, true)}
+              title="勾选加入批量选择"
+            />
             {!e.isDir && (
               <button className="grid-preview-btn" title="预览" onClick={(ev) => { ev.stopPropagation(); p.onPreview(e); }}>
                 <IconEye size={13} />

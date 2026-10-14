@@ -33,6 +33,9 @@ interface Props {
   onSave(next: AppConfig): Promise<void>;
   onClose(): void;
   onLogin(serverId: string): void;
+  /** 0.3.7 需求6：设置页内下拉切换数据源（本地/服务端一/服务端二）——切换后
+   *  App 侧保持 view==="settings" 不跳回文件页，用户仍停留在本页。 */
+  onSwitchSource(target: { kind: "local"; rootId: string } | { kind: "server"; serverId: string }): Promise<void>;
 }
 
 type Tab = "local" | "servers" | "appearance" | "transfer" | "ai" | "account" | "about";
@@ -71,6 +74,22 @@ export default function Settings(p: Props) {
   const [ffmpegDraft, setFfmpegDraft] = useState(p.cfg.ui.ffmpegPath ?? "");
   const [ffmMsg, setFfmMsg] = useState("");
   const [ffmErr, setFfmErr] = useState("");
+  // 0.3.7 需求6：设置页内数据源下拉切换（本地/服务端一/服务端二）——切换中禁用，
+  // 完成后停留本页（App 保证不跳文件页）。
+  const [switching, setSwitching] = useState(false);
+  const cur = active();
+  const sourceVal = cur.kind === "server" ? `server:${cur.serverId ?? ""}` : `local:${cur.rootId ?? ""}`;
+
+  async function switchSource(v: string) {
+    const [kind, id] = v.split(":");
+    if (!id) return;
+    setSwitching(true);
+    try {
+      await p.onSwitchSource(kind === "server" ? { kind: "server", serverId: id } : { kind: "local", rootId: id });
+    } finally {
+      setSwitching(false);
+    }
+  }
 
   // 版本信息：走 Tauri app 命令（core:app:default 已含 allow-version/allow-name/
   // allow-tauri-version，无需扩权限），故 -V 覆盖产物版本时这里同步变化；
@@ -242,6 +261,32 @@ export default function Settings(p: Props) {
           <span className="ver">{info.version ? `v${info.version}` : "未知"}</span>
         </div>
       </div>
+      {/* 0.3.7 需求6：数据源切换下拉框——本地/服务端一/服务端二统一在这里切换；
+          切换不离开设置页（旧实现：顶部快速切换会把视图弹回文件列表，配置中途
+          被打断；本页切换保持停留，未登录的服务端切过去即游客只读，登录走
+          「服务端」页签的登录按钮或弹出的登录框）。 */}
+      <div className="source-switch">
+        <label className="dim" htmlFor="source-select">当前数据源</label>
+        <select id="source-select" value={sourceVal} disabled={switching} onChange={(e) => void switchSource(e.target.value)}>
+          {cfg.localRoots.map((r) => (
+            <option key={`l:${r.id}`} value={`local:${r.id}`}>
+              本地 · {r.name}
+            </option>
+          ))}
+          {cfg.servers.map((s, i) => (
+            <option key={`s:${s.id}`} value={`server:${s.id}`}>
+              服务端{i + 1} · {s.name || "(未命名)"}{s.token ? "（已登录）" : "（游客）"}
+            </option>
+          ))}
+          {!(
+            (cur.kind === "local" && cfg.localRoots.some((r) => r.id === cur.rootId)) ||
+            (cur.kind === "server" && cfg.servers.some((s) => s.id === cur.serverId))
+          ) && <option value={sourceVal || ""}>（未选定或来源已删除）</option>}
+          {cfg.localRoots.length === 0 && cfg.servers.length === 0 && <option value="">（尚未配置任何数据源）</option>}
+        </select>
+        {switching && <span className="dim">切换中…</span>}
+        <span className="dim tip">切换即时生效；停留本页可继续配置，看完文件列表再点侧栏「文件」即可。</span>
+      </div>
       <div className="tabs">
         {(
           [
@@ -402,8 +447,9 @@ export default function Settings(p: Props) {
             启动时恢复各服务端登录状态（需求9：上次保持登录的重开后仍是登录态；
             关闭则每次启动全部退出——已记住的密码保留，退出状态的服务端可一键快速重登）
           </label>
-          {/* 0.3.0 需求1 / 0.3.3 需求3：H.264/H.265 播放三档——系统解码器（默认）/
-              ffmpeg 转码（用户配置 ffmpeg，不内嵌）/ 外部播放器 */}
+          {/* 0.3.0 需求1 / 0.3.3 需求3 / 0.3.7 需求3：H.264/H.265 播放四档——
+              系统解码器（默认）/ ffmpeg 转码 / ffmpeg 解码+原生渲染（逐帧不落盘）/
+              外部播放器 */}
           <div className="field">
             <label>视频播放（H.264 / H.265）</label>
             <div className="radio-row">
@@ -426,6 +472,14 @@ export default function Settings(p: Props) {
               <label className="radio-item">
                 <input
                   type="radio"
+                  checked={cfg.ui.videoDecoder === "render"}
+                  onChange={() => uiSet({ videoDecoder: "render" })}
+                />
+                ffmpeg 解码+原生渲染（窗口内逐帧）
+              </label>
+              <label className="radio-item">
+                <input
+                  type="radio"
                   checked={cfg.ui.videoDecoder === "external"}
                   onChange={() => uiSet({ videoDecoder: "external" })}
                 />
@@ -433,14 +487,18 @@ export default function Settings(p: Props) {
               </label>
             </div>
             <p className="dim tip">
-              0.3.6 起三档共用真实编码探测（`ffmpeg -i` 窥首轨编码，毫秒级）：检测到 H.265/HEVC 时——
-              配置了可用 ffmpeg（本设置「ffmpeg 路径」或 PATH）就<b>自动转码后窗口内播放</b>（首次转码有
-              等待、之后复用产物），不再先撞一次必然失败的系统解码；未配置 ffmpeg 则维持系统解码尝试，
-              失败面板给「用 ffmpeg 转码播放 / 用外部播放器打开」一键兜底。
+              0.3.6 起四档共用真实编码探测（`ffmpeg -i` 窥首轨编码，毫秒级）：检测到 H.265/HEVC 时——
+              配置了可用 ffmpeg（本设置「ffmpeg 路径」或 PATH）就<b>自动转码后窗口内播放</b>（0.3.7 起转码
+              带<b>实时进度与取消</b>，关闭查看即中断转码、不再残留半成品），不再先撞一次必然失败的系统
+              解码；未配置 ffmpeg 则维持系统解码尝试，失败面板给「用 ffmpeg 转码播放 / 用外部播放器打开」
+              一键兜底。
               系统解码器 = 操作系统自带的视频组件（Windows：WebView2/Media Foundation；Linux：GStreamer；
               H.265 需「HEVC 视频扩展」/gstreamer HEVC 插件才可能直接播出）。
-              ffmpeg 转码档 = 凡无法直接解码的视频一律先转 H.264 MP4 再窗口内播放（HEVC-in-MP4 也会转，
-              旧版被容器后缀放行导致播放失败的问题已修复）；转码产物入媒体缓存、受缓存上限自动淘汰。
+              ffmpeg 转码档 = 凡无法直接解码的视频一律先转 H.264 MP4 再窗口内播放（产物入媒体缓存、
+              同一文件只转一次之后秒开，首次大文件耗 CPU）。
+              <b>ffmpeg 解码+原生渲染档（0.3.7 新增）</b> = 不生成整段转码产物：按需逐帧解码上屏
+              （帧率随 CPU 约 2–4 fps，音轨单独提取用于对时，无音轨自动静音；不含字幕轨），
+              适合"立刻要看、不想等整段转码"的场景；与转码档共用上方 ffmpeg 路径。
             </p>
             {cfg.ui.videoDecoder === "external" && (
               <>
