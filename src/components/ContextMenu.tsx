@@ -1,4 +1,4 @@
-// 轻量右键菜单（0.6.0 需求7）：受控渲染，点击遮罩/Escape 关闭。
+// 轻量右键菜单（需求7）：受控渲染，点击遮罩/Escape 关闭。
 import { useEffect, type ReactNode } from "react";
 
 export interface CtxItem {

@@ -261,6 +261,8 @@ pre,
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* 0.1.7：查看覆盖层（.viewer absolute）的包含块 */
+  position: relative;
 }
 .topbar {
   height: 56px;
@@ -338,7 +340,7 @@ pre,
   padding: 0 3px;
 }
 
-/* ---------- 快速切换"更多"下拉（0.6.0 需求10） ---------- */
+/* ---------- 快速切换"更多"下拉（需求10） ---------- */
 .qs-more-wrap {
   position: relative;
   display: inline-flex;
@@ -388,7 +390,7 @@ pre,
   white-space: nowrap;
 }
 
-/* ---------- 文件右键菜单（0.6.0 需求7） ---------- */
+/* ---------- 文件右键菜单（需求7） ---------- */
 .ctx-backdrop {
   position: fixed;
   inset: 0;
@@ -950,6 +952,53 @@ tr.row.selected {
   color: var(--text-dim);
   letter-spacing: 0.5px;
 }
+/* 0.3.3 需求4：面板头部行（标题 + 隐藏按钮） */
+.transfer-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+/* 0.3.3 需求4：收起态——右下角悬浮开关（与面板同层：查看 90 < 本钮/面板 150 < 弹窗 100? 不——
+   模态 100 在面板之下是 0.3.2 既有层叠，本钮与面板同层 150，模态之上仍盖住它属有意：
+   登录框等模态期间不应可点传输开关。toast 200 恒在上） */
+.transfer-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--toast-bg);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--shadow);
+  color: var(--accent);
+  cursor: pointer;
+  z-index: 150;
+  animation: pop 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+.transfer-fab:hover {
+  border-color: var(--accent);
+}
+.transfer-fab-badge {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--grad);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
 .transfer-item {
   display: flex;
   flex-direction: column;
@@ -1156,6 +1205,17 @@ input[type="radio"] {
 }
 
 /* ---------- 设置页 ---------- */
+/* 0.1.4（需求2）：设置由浮动模态卡片改为主区整页视图（复用 .page 容器，左侧导航
+   保持可见/可折叠），内容列居中限宽。页内子对话框（添加/编辑服务端、http 确认）
+   经 Modals 的 createPortal 挂 body，恒浮于本页之上。 */
+.settings-inner {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 .tabs {
   display: flex;
   gap: 4px;
@@ -1224,6 +1284,53 @@ input[type="radio"] {
 }
 .inline-form select {
   width: 110px;
+}
+
+/* 版本信息（0.1.5）：设置页头右侧常驻版本徽标 + "关于"页签卡片 */
+.settings-ver {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  padding-top: 3px;
+}
+.settings-ver .ver {
+  font-family: ui-monospace, monospace;
+  font-size: 12.5px;
+  color: var(--accent-text);
+  background: var(--hover-2);
+  border-radius: 999px;
+  padding: 2px 9px;
+  user-select: text;
+}
+.about-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 18px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card-bg);
+  text-align: center;
+}
+.about-name {
+  font-size: 16px;
+  font-weight: 700;
+}
+.about-ver {
+  font-family: ui-monospace, monospace;
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--accent-text);
+  letter-spacing: 0.5px;
+  user-select: text;
+}
+.about-val {
+  font-family: ui-monospace, monospace;
+  font-size: 12.5px;
+  text-align: right;
 }
 
 /* 主题选择卡片（需求5） */
@@ -1379,6 +1486,100 @@ input[type="radio"] {
   font-size: 11.5px;
 }
 
+/* ---------- 查看（0.1.7：双击主区内联显示；大图片无大小限制） ----------
+   层叠：.modal-mask 100 > .viewer-fs 90 > .viewer 80 > 页面内容；
+   transfer-panel 150 / toast 200 恒在上（查看时进度与通知可见，有意保留）。 */
+.viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+}
+.viewer-fs {
+  position: fixed;
+  z-index: 90;
+  background: var(--modal-bg);
+}
+.viewer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.viewer-name {
+  font-size: 14px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.viewer-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 14px;
+}
+.viewer-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+/* 0.3.6 需求1：图片放大缩小查看（FileViewer）——缩放容器占满查看区、
+   溢出裁切；img 以 transform 缩放/平移（transform-origin 居中），
+   touch-action:none 保证指针拖拽平移不被浏览器手势吞掉 */
+.viewer-zoombox {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+}
+.viewer-zoombox .viewer-img {
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.zlabel-zoom {
+  min-width: 44px;
+  text-align: right;
+  font-size: 12px;
+}
+.viewer-video {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 10px;
+  background: #000;
+}
+.viewer-audio {
+  width: min(640px, 100%);
+}
+.viewer-pdf {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 10px;
+  background: #fff;
+}
+.viewer-text {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+}
+
 /* ---------- 预览（需求11） ---------- */
 .preview-box {
   display: grid;
@@ -1423,17 +1624,21 @@ input[type="radio"] {
   word-break: break-all;
 }
 
-/* ---------- 可折叠侧栏（0.4.0，总结4：默认收成左缘小箭头标签） ---------- */
+/* ---------- 可折叠侧栏（默认收成左缘小箭头标签） ---------- */
+/* 0.1.4：折叠标签贴窗口左上角（原整列拉伸、箭头垂直居中，设置页下不易注意） */
 .sidebar-tab {
-  width: 16px;
-  min-width: 16px;
-  align-self: stretch;
+  width: 18px;
+  min-width: 18px;
+  align-self: flex-start;
+  height: 52px;
+  margin-top: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: none;
-  border-right: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-left: none;
+  border-radius: 0 10px 10px 0;
   background: var(--sidebar-bg);
   color: var(--text-dim);
   cursor: pointer;
@@ -1442,8 +1647,9 @@ input[type="radio"] {
   background: var(--hover-2);
   color: var(--text);
 }
+/* 0.1.4：展开态折叠按钮移至导航栏左上角（brand 行首位，与折叠态标签同角） */
 .brand-collapse {
-  margin-left: auto;
+  flex: none;
   width: 28px;
   height: 28px;
 }
@@ -1452,7 +1658,7 @@ input[type="radio"] {
   transform: rotate(180deg);
 }
 
-/* 禁用态按钮（游客禁下载等，0.4.0） */
+/* 禁用态按钮（游客禁下载等） */
 .mini:disabled,
 .icon-btn:disabled {
   opacity: 0.35;
@@ -1463,7 +1669,7 @@ input[type="radio"] {
   color: var(--text-dim);
 }
 
-/* 网格卡片显式预览按钮（0.4.0，需求12：两种视图都有预览入口） */
+/* 网格卡片显式预览按钮（需求12：两种视图都有预览入口） */
 .grid-item {
   position: relative;
 }
@@ -1490,4 +1696,122 @@ input[type="radio"] {
 }
 .grid-preview-btn:hover {
   color: var(--text);
+}
+
+/* ---------- 0.3.7 需求6：设置页数据源切换下拉（页签行之上常驻） ---------- */
+.source-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card-bg);
+}
+.source-switch label {
+  font-size: 13px;
+}
+.source-switch select {
+  min-width: 220px;
+}
+.source-switch .tip {
+  font-size: 12px;
+}
+
+/* ---------- 0.3.7 需求5：批量选择（复选框列/网格勾选/选择计数条） ---------- */
+.row-check {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+  vertical-align: middle;
+}
+.grid-check {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.grid-item:hover .grid-check,
+.grid-item.selected .grid-check {
+  opacity: 1;
+}
+.sel-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.sel-count b {
+  color: var(--accent-text);
+}
+
+/* ---------- 0.3.2 目录重传差异询问对话框 ---------- */
+.diff-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px 8px;
+  margin: 8px 0;
+}
+.diff-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+  border-bottom: 1px dashed var(--line);
+  font-size: 13px;
+}
+.diff-row:last-child {
+  border-bottom: none;
+}
+.diff-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.diff-size {
+  flex-shrink: 0;
+}
+.diff-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+/* ---------- 0.3.2 传输页：未完成的上传账本组 ---------- */
+.journal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.journal-row .journal-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

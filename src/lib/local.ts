@@ -87,16 +87,22 @@ export class LocalSource implements DataSource {
   }
 
   mediaCache(entry: FsEntry): Promise<string> {
-    return invoke("fs_media_cache", { rootId: this.rootId, path: entry.path }) as Promise<string>;
+    // ver=entry.mtime：缓存键含版本串，覆盖后自动重拉（0.1.7 图片也走本通道）
+    return invoke("fs_media_cache", {
+      rootId: this.rootId,
+      path: entry.path,
+      ver: String(entry.mtime),
+    }) as Promise<string>;
   }
 
-  async thumbData(entry: FsEntry): Promise<string | null> {
-    if (entry.kind !== "image" || entry.size > 4 << 20) return null;
-    try {
-      return await this.previewData(entry);
-    } catch {
-      return null;
-    }
+  thumbPath(entry: FsEntry): Promise<string | null> {
+    // 0.2.1：Rust 生成 ≤512px 缩略图路径（RAW 取内嵌预览）。0.3.2 语义：null=
+    // 永久无缩略图（Rust 显式返回），抛错=瞬时失败（调用方退避重试）。
+    return invoke("fs_thumb", {
+      rootId: this.rootId,
+      path: entry.path,
+      ver: String(entry.mtime),
+    }) as Promise<string | null>;
   }
 
   async uploadFile(localPath: string, dir: string, transferId: string): Promise<void> {
@@ -141,4 +147,27 @@ export class LocalSource implements DataSource {
   versionsRemove(versionId: number | string): Promise<void> {
     return invoke("fs_versions_remove", { versionId: String(versionId) });
   }
+}
+
+// ---------- 需求41：目录上传的本地树枚举 ----------
+
+export interface WalkEntry {
+  name: string;
+  /** 相对被遍历目录，正斜杠。 */
+  relPath: string;
+  isDir: boolean;
+  size: number;
+  /** 0.3.7 需求2：修改时间毫秒（目录/读不到=0）——上传账本内容证据 */
+  mtimeMs: number;
+}
+
+export interface WalkResult {
+  entries: WalkEntry[];
+  /** 超深度/条目上限（Rust 侧 64 层/20000 条）——调用方应整体拒绝，不传半棵树。 */
+  truncated: boolean;
+}
+
+/** 递归枚举本地目录（fs_walk；本地专属辅助，不扩 DataSource 契约，与 joinLocalAbs 同类）。 */
+export function walkLocalDir(rootId: string, path: string): Promise<WalkResult> {
+  return invoke("fs_walk", { rootId, path }) as Promise<WalkResult>;
 }

@@ -5,7 +5,9 @@
 # 产物：NSIS 安装包 exe（filemanageClient_windows10_<版本号>.exe）
 #
 # 交叉方案：rust 目标 x86_64-pc-windows-gnu + mingw-w64 + tauri bundler NSIS
-#   （makensis 在 Linux 上打安装包）。目标平台不依赖 GTK/webkit，装包远小于 Linux 环境。
+#   （makensis 在 Linux 上打安装包）。目标平台不依赖 GTK/webkit，装包远小于 Linux 环境
+#   （例外：libayatana-appindicator3-dev 仅供 tauri-cli 在 Linux 宿主上的 tray-icon
+#   打包探测，见下方注释，不参与 Windows 链接）。
 # "最低 Windows 10" 依据：Tauri 2 依赖 WebView2 Evergreen 运行时（2023 年起仅支持
 #   Win10+），产物天然最低 Win10；命名与文档落实（见 build-env/README.md）。
 # TLS：reqwest native-tls 在 windows 目标走 schannel，无需 openssl。
@@ -38,6 +40,19 @@ RUN export CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/opt/rustup && \
 # Windows GNU 交叉目标 std（mingw 链接所需 dlltool/ld/gcc 由 mingw-w64 提供）
 RUN CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/opt/rustup /usr/local/cargo/bin/rustup target add x86_64-pc-windows-gnu \
     && x86_64-w64-mingw32-gcc --version | head -1 && makensis -VERSION
+
+# appindicator 开发包——供 **tauri-cli 宿主机侧探测**，不是 Windows 目标的链接依赖：
+# 0.3.0 启用 tauri "tray-icon" 特性后，tauri-cli 2.11.4 在 Linux 宿主执行 tauri build
+# 打包阶段，只要 manifest 开启该特性就无条件用 pkg-config 探测 appindicator（源码
+# 该块门控是 #[cfg(target_os="linux")]，判宿主机而非 --target；实测 dev 分支未修），
+# 两个 .pc 都找不到即 panic "Can't detect any appindicator library"（Jenkins #48：
+# exe 编译成功、NSIS 打包即崩）。探测结果只写进 deb Depends/AppImage 附带文件，对
+# nsis 产物无影响，但探测本身无法跳过，也没有绕过 env——TAURI_LINUX_AYATANA_APPINDICATOR
+# 两个取值分支同样要 pkg-config 成功。独立成层放在 rust 之后：不失效既有 apt/node/rust
+# 缓存层。回退方案（不想增层时）：容器内伪造仅含 Libs: -L 的 .pc 进 PKG_CONFIG_PATH。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libayatana-appindicator3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV CARGO_HOME=/opt/cargo \
     RUSTUP_HOME=/opt/rustup \

@@ -32,11 +32,11 @@ export interface ServerConf {
   name: string;
   baseUrl: string;
   username?: string | null;
+  /** 登录凭证（0.2.4 单凭证：活跃滑动续期服务端无感完成，串不变） */
   token?: string | null;
-  refreshToken?: string | null;
   /** 信任自签证书（服务端 TLS 自签时开启；不推荐，会跳过全部证书校验） */
   insecureTls?: boolean;
-  /** 指定 CA 证书文件（PEM）；自签场景推荐，等效证书固定（0.4.0） */
+  /** 指定 CA 证书文件（PEM）；自签场景推荐，等效证书固定 */
   caFile?: string | null;
 }
 
@@ -70,15 +70,26 @@ export interface UiConf {
   restoreLastLocation: boolean;
   lastLocation?: LastLocation | null;
   groupByKind: boolean;
-  /** 左侧导航栏折叠为小箭头标签（0.4.0，默认 true） */
+  /** 左侧导航栏折叠为小箭头标签（默认 true） */
   sidebarCollapsed: boolean;
-  /** 启动时恢复各服务端登录状态（0.6.0 需求9，默认 true；关闭则启动即全部退出） */
+  /** 启动时恢复各服务端登录状态（需求9，默认 true；关闭则启动即全部退出） */
   restoreSessions: boolean;
-  /** 快速切换第二按钮指向的远程服务端 id（0.6.0 需求10） */
+  /** 快速切换第二按钮指向的远程服务端 id（需求10） */
   lastServerId?: string | null;
+  /** 关闭按钮(X)行为（0.3.0 需求2，默认 tray：隐藏到托盘；quit：退出程序） */
+  closeAction: "tray" | "quit";
+  /** 视频播放方式（0.3.0 需求1；0.3.3 增 ffmpeg 档；0.3.7 需求3 四档定版。
+   *  默认 system=WebView 系统解码器；ffmpeg=经配置的 ffmpeg 转码 H.264 MP4 后
+   *  窗口内播放（产物复用）；render=ffmpeg 逐帧解码 + 前端 canvas 原生渲染
+   *  （不落盘产物、音轨单独提取对时）；external=外部播放器 */
+  videoDecoder: "system" | "ffmpeg" | "render" | "external";
+  /** 外部播放器命令（0.3.0 需求1；空=系统关联播放器，支持 {file} 占位符） */
+  videoPlayerCmd?: string | null;
+  /** ffmpeg 可执行文件路径（0.3.3 需求3；空=PATH 自动探测 "ffmpeg"，不内嵌） */
+  ffmpegPath?: string | null;
 }
 
-/** 已记住密码的服务端账户索引（0.6.0 需求3；密码本体存系统凭证库） */
+/** 已记住密码的服务端账户索引（需求3；密码本体存系统凭证库） */
 export interface CredRef {
   serverId: string;
   username: string;
@@ -97,10 +108,26 @@ export interface AppConfig {
   active?: ActiveConf | null;
   ui: UiConf;
   transfer: TransferConf;
-  /** 本地回收站自动清理保留天数（0.4.0，默认 30；与服务端策略各自独立） */
+  /** 本地回收站自动清理保留天数（默认 30；与服务端策略各自独立） */
   trashRetentionDays: number;
-  /** 已记住密码的 服务端+账户 索引（0.6.0 需求3） */
+  /** 已记住密码的 服务端+账户 索引（需求3） */
   credentials: CredRef[];
+  /** 媒体/缩略图缓存配额（0.3.2，需求3/4/5） */
+  cache: CacheConf;
+  /** 客户端唯一标识（0.3.6 认证契约；Rust 侧权威生成/维护，前端只透传） */
+  clientId?: string;
+}
+
+/** 媒体/缩略图缓存配额（0.3.2）：磁盘上限由 Rust LRU 执行、内存上限由前端
+ *  thumbcache.ts LRU 执行；磁盘条目跨程序退出保留。 */
+export interface CacheConf {
+  /** 磁盘缓存上限 MB（默认 10240 = 10GB） */
+  maxDiskMb: number;
+  /** 缩略图内存缓存上限 MB（默认 2048 = 2GB） */
+  maxMemMb: number;
+  /** 媒体/缩略图缓存目录（0.3.8 需求5）：null/空=默认 `<appcache>/media`；
+   *  设置页"切换/迁移"命令（cache_set_dir）维护，快照透传时不可丢 */
+  dir?: string | null;
 }
 
 export interface ServerRoot {

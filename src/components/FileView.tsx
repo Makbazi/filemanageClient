@@ -1,9 +1,11 @@
 // 文件列表页：面包屑 + 操作工具栏 + 筛选/排序栏（需求15/16）+
 // 列表/缩略图两种浏览风格（需求14）。
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { thumbBlobUrl } from "../lib/thumbcache";
 import type { FsEntry } from "../lib/types";
 import type { SourceCapabilities } from "../lib/datasource";
 import { fmtSize, fmtTime, dirParts, kindLabel, toMillis } from "../lib/format";
+import { viewableType } from "../lib/preview";
 import * as api from "../lib/api";
 import {
   kindIcon,
@@ -45,7 +47,10 @@ interface Props {
   onViewMode(m: "list" | "grid"): void;
   groupByKind: boolean;
   onGroupByKind(v: boolean): void;
+  /** 双击=查看（0.1.7：可预览类型主区内联全屏可看；目录进入；其余弹窗） */
   onOpen(entry: FsEntry): void;
+  /** 预览按钮：弹窗缩略式（0.1.7 与查看分离） */
+  onPreview(entry: FsEntry): void;
   onBreadcrumb(path: string): void;
   onRefresh(): void;
   onMkdir(): void;
@@ -74,30 +79,170 @@ export default function FileView(p: Props) {
   const [kindFilter, setKindFilter] = useState("");
   const [sortField, setSortField] = useState<"name" | "size" | "mtime">("name");
   const [sortAsc, setSortAsc] = useState(true);
+  // —— 0.3.2 网格缩略图视口调度（需求3/5："全量显示 + 可见±2屏预取 + 失败重试"） ——
+  // 旧实现三宗罪：slice(0,60) 硬上限（目录大 → 后面的图永远不出图）、失败写死
+  // null 永不重试、按 path 键粘住旧图/错误。新实现：
+  //  · IntersectionObserver（root=.page 滚动容器，rootMargin 上下各 2 屏）只把
+  //    "即将/正在可见"的条目排入队列——图片再多也全量覆盖（滚到哪出到哪）；
+  //  · 键 = path@mtime（刷新/覆盖后自动换新键重取）；目录切换整体复位；
+  //  · 并发 3；瞬时失败退避 2s/8s/30s 重试 ≤3 轮才落图标（thumbPath 语义：
+  //    null=永久无图不重试，throw=瞬时重试）；
+  //  · 字节经 thumbcache（≤2GB 内存 LRU blob），滚动回来零磁盘读。
+  // 键 = 来源标识 + path@mtime（服务端虚拟根 id 可跨服务端重名，须带 serverId；
+  // 与 Rust 媒体缓存键同构）；目录切换整体复位；
+  const tkeyOf = (e: FsEntry) => {
+    const a = api.active();
+    const src = a.kind === "server" ? `${a.serverId ?? ""}|${a.rootId}` : a.rootId;
+    return `${src}/${e.path}@${String(e.mtime)}`;
+  };
+  const thumbKeyOf = (e: FsEntry): string | undefined =>
+    !e.isDir && viewableType(e) === "image" ? tkeyOf(e) : undefined;
+
   const [thumbs, setThumbs] = useState<Record<string, string | null>>({});
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const ioRef = useRef<IntersectionObserver | null>(null);
+  const queueRef = useRef<string[]>([]);
+  const queuedRef = useRef<Set<string>>(new Set()); // 队列成员 O(1) 去重（0.3.5）
+  const visibleRef = useRef<Set<string>>(new Set()); // 当前与视口±2屏相交的 tkey（0.3.5 优先级）
+  const failedRef = useRef<Set<string>>(new Set()); // 瞬时耗尽（可随再可见重武装），≠永久无图（0.3.5）
+  const rearmRef = useRef<Map<string, number>>(new Map()); // 每 key 重武装次数（≤3 防死循环）
+  const runningRef = useRef(0);
+  const settledRef = useRef<Set<string>>(new Set());
+  const attemptsRef = useRef<Map<string, number>>(new Map());
+  const entriesRef = useRef<Map<string, FsEntry>>(new Map());
+  const timersRef = useRef<number[]>([]);
 
   useEffect(() => {
     setSel(new Set());
     setQ("");
     setKindFilter("");
+    setBulk(false); // 0.3.8：换目录/换来源退出批量模式（批量是显式动作）
   }, [p.path, p.rootName, p.isServer]);
 
-  // 网格视图缩略图懒加载（仅图像、限前 60 个）
+  // key→entry 索引（entries 变化即刷新；调度循环据此取条目）
   useEffect(() => {
-    if (p.viewMode !== "grid") return;
-    let cancelled = false;
-    const src = api.source();
-    const targets = p.entries.filter((e) => e.kind === "image" && e.size <= 8 << 20).slice(0, 60);
-    targets.forEach(async (e) => {
-      if (thumbs[e.path] !== undefined) return;
-      const d = await src.thumbData(e).catch(() => null);
-      if (!cancelled) setThumbs((prev) => ({ ...prev, [e.path]: d }));
-    });
-    return () => {
-      cancelled = true;
-    };
+    const m = new Map<string, FsEntry>();
+    for (const e of p.entries) {
+      const k = thumbKeyOf(e);
+      if (k) m.set(k, e);
+    }
+    entriesRef.current = m;
+    dispatchThumbs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [p.viewMode, p.entries]);
+  }, [p.entries]);
+
+  // 目录/来源切换：队列、结算表、观察器全部复位（防粘旧图、防跨目录串图）
+  useEffect(() => {
+    setThumbs({});
+    queueRef.current = [];
+    queuedRef.current = new Set();
+    visibleRef.current = new Set();
+    failedRef.current = new Set();
+    rearmRef.current = new Map();
+    // runningRef 不重置：在途 future 结束时各自减一（重置会致负值放大并发）
+    settledRef.current = new Set();
+    attemptsRef.current = new Map();
+    for (const t of timersRef.current) clearTimeout(t);
+    timersRef.current = [];
+    if (ioRef.current) {
+      ioRef.current.disconnect();
+      ioRef.current = null;
+    }
+  }, [p.path, p.rootName, p.isServer]);
+
+  // 卸载清理
+  useEffect(() => {
+    return () => {
+      ioRef.current?.disconnect();
+      ioRef.current = null;
+      for (const t of timersRef.current) clearTimeout(t);
+      timersRef.current = [];
+    };
+  }, []);
+
+  function settleThumb(key: string, v: string | null) {
+    settledRef.current.add(key);
+    setThumbs((prev) => ({ ...prev, [key]: v }));
+  }
+
+  // 0.3.5 需求1/2：调度改造（Windows 后段全图标 / Linux 缩略图问题的根治）——
+  //  ① 视口优先：旧 FIFO 下滚动新进入的格子排在全部预取旧格之后，被大文件
+  //    整文件兜底通道饿死（池仅 3）。现在每次取任务优先取仍在视口(±2屏)内的
+  //    队首项，滚到哪先出哪。
+  //  ②（0.3.6 移除）慢通道隔离：旧 >16MiB 条目并发 ≤1 是为"整文件下载兜底"
+  //    设置的限流；srv_thumb 浏览零整文件后 /thumb 响应恒为几十 KB，隔离失去
+  //    存在理由，并发统一 3。
+  //  ③ 瞬时失败不再永久化：3 轮退避耗尽只落图标（failedRef），单元格再次
+  //    进入视口即重武装重入队（每 key ≤3 批，防真坏文件死循环）。
+  function dispatchThumbs() {
+    while (runningRef.current < 3) {
+      const q = queueRef.current;
+      let idx = -1;
+      let purged = false;
+      // 两遍扫描：先取仍在视口(±2屏)内的（滚到哪先出哪），再取预取区的（FIFO）
+      for (let pass = 0; pass < 2 && idx < 0; pass++) {
+        for (let i = 0; i < q.length; i++) {
+          const k = q[i];
+          if (settledRef.current.has(k)) {
+            q.splice(i, 1);
+            queuedRef.current.delete(k);
+            purged = true;
+            continue;
+          }
+          if (pass === 0 ? !visibleRef.current.has(k) : false) continue;
+          idx = i;
+          break;
+        }
+      }
+      if (idx < 0) {
+        if (purged) continue; // 剔除了作废项，重扫队列
+        break; // 无可运行项（或队列空）
+      }
+      const key = q.splice(idx, 1)[0];
+      queuedRef.current.delete(key);
+      const e = entriesRef.current.get(key);
+      if (!e) continue; // 条目已被移除（刷新后消失）：丢弃
+      if (api.isAnonymous()) {
+        // 游客：/thumb 与旧预览通道一律需登录（匿名语义未变）——立即图标，不重试
+        settledRef.current.add(key);
+        setThumbs((prev) => ({ ...prev, [key]: null }));
+        continue;
+      }
+      runningRef.current++;
+      void (async () => {
+        try {
+          const path = await api.source().thumbPath(e);
+          if (!path) {
+            settleThumb(key, null); // Rust 明示无缩略图（415/404/413/403 永久面）：图标回退，不重试
+            return;
+          }
+          const url = await thumbBlobUrl(key, path);
+          settleThumb(key, url);
+        } catch {
+          const n = (attemptsRef.current.get(key) ?? 0) + 1;
+          attemptsRef.current.set(key, n);
+          if (n <= 3) {
+            const delay = [2000, 8000, 30000][n - 1];
+            const h = window.setTimeout(() => {
+              if (!settledRef.current.has(key) && !queuedRef.current.has(key)) {
+                queueRef.current.push(key);
+                queuedRef.current.add(key);
+              }
+              dispatchThumbs();
+            }, delay);
+            timersRef.current.push(h);
+          } else {
+            // 瞬时耗尽：本轮落图标但不判永久——再次进入视口重武装（0.3.5）
+            failedRef.current.add(key);
+            setThumbs((prev) => ({ ...prev, [key]: null }));
+          }
+        } finally {
+          runningRef.current--;
+          dispatchThumbs();
+        }
+      })();
+    }
+  }
 
   const filtered = useMemo(() => {
     const lq = q.trim().toLowerCase();
@@ -128,15 +273,122 @@ export default function FileView(p: Props) {
     return KIND_ORDER.filter((k) => map.has(k)).map((k) => [k, map.get(k)!] as [string, FsEntry[]]);
   }, [filtered, p.groupByKind]);
 
+  // 渲染后把带 data-tkey 的卡片挂进观察器（IO 对当前相交状态会立刻回调一次；
+  // 必须在 filtered/groups 之后注册——deps 直接引用这两个派生值）
+  useLayoutEffect(() => {
+    if (p.viewMode !== "grid") return;
+    const root = pageRef.current;
+    if (!root) return;
+    if (!ioRef.current && typeof IntersectionObserver !== "undefined") {
+      ioRef.current = new IntersectionObserver(
+        (es) => {
+          for (const en of es) {
+            const k = (en.target as HTMLElement).dataset.tkey;
+            if (!k) continue;
+            if (!en.isIntersecting) {
+              visibleRef.current.delete(k);
+              continue;
+            }
+            visibleRef.current.add(k);
+            if (settledRef.current.has(k) || queuedRef.current.has(k)) continue;
+            // 0.3.5：瞬时耗尽的格子再次进入视口 → 重武装重入队（每 key ≤3 批，
+            // 真坏/真慢文件也不会无限循环；永久无图 settled(null) 不重入）
+            if (failedRef.current.has(k)) {
+              const r = (rearmRef.current.get(k) ?? 0) + 1;
+              if (r > 3) {
+                settledRef.current.add(k);
+                continue;
+              }
+              rearmRef.current.set(k, r);
+              failedRef.current.delete(k);
+              attemptsRef.current.set(k, 0);
+            }
+            queueRef.current.push(k);
+            queuedRef.current.add(k);
+          }
+          dispatchThumbs();
+        },
+        // 上下各预取 2 屏（需求3"向上向下各缓存 2[屏]"）：margin 为 root 高的百分比
+        { root, rootMargin: "200% 0px 200% 0px" }
+      );
+    }
+    root.querySelectorAll<HTMLElement>("[data-tkey]").forEach((el) => ioRef.current?.observe(el));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.viewMode, filtered, groups]);
+
   const selEntries = filtered.filter((e) => sel.has(e.path));
-  const toggle = (e: FsEntry, multi: boolean) => {
+
+  // 0.3.7 需求5：批量选择升级——复选框列（点框=增量勾选）、Ctrl/Cmd+点=加选、
+  // Shift+点=锚点到当前的连续范围选、Ctrl/Cmd+A=全选筛选结果、表头框=全选/清空。
+  // 选中集合按 path 存（与旧一致），故批量下载/复制/移动/删除等既有批量操作直接
+  // 复用 selEntries，无需改动 App 层操作实现。anchorRef 记录最近一次"非范围"选中
+  // 的条目下标（Shift 以它为起点）。
+  const anchorRef = useRef<number>(-1);
+  // 0.3.8 需求4：批量操作**不再默认开启**——复选框列/Ctrl+A/Shift 范围选/
+  // "已选 N 项"状态条全部由工具栏 [批量操作] 按钮进出；默认态单击=单选
+  // （重命名/复制/移动/删除等单文件操作路径不变）。退出批量模式即清空选择。
+  const [bulk, setBulk] = useState(false);
+  const selectAll = () => setSel(new Set(filtered.map((e) => e.path)));
+  const clearSel = () => {
+    setSel(new Set());
+    anchorRef.current = -1;
+  };
+  const toggleBulk = () => {
+    if (bulk) clearSel();
+    setBulk(!bulk);
+  };
+  const toggleOne = (e: FsEntry) =>
     setSel((prev) => {
+      const n = new Set(prev);
+      const i = filtered.findIndex((x) => x.path === e.path);
+      if (n.has(e.path)) n.delete(e.path);
+      else n.add(e.path);
+      anchorRef.current = i;
+      return n;
+    });
+  // multi=加选(Ctrl)；shift=范围选；二者皆非=单选替换
+  const toggle = (e: FsEntry, multi: boolean, shift = false) => {
+    const i = filtered.findIndex((x) => x.path === e.path);
+    setSel((prev) => {
+      if (shift && anchorRef.current >= 0) {
+        const [a, b] = [Math.min(anchorRef.current, i), Math.max(anchorRef.current, i)];
+        const n = new Set(prev);
+        for (let k = a; k <= b && k < filtered.length; k++) n.add(filtered[k].path);
+        return n;
+      }
       const n = new Set(multi ? prev : []);
       if (n.has(e.path)) n.delete(e.path);
       else n.add(e.path);
+      anchorRef.current = i;
       return n;
     });
   };
+
+  // 表头复选框三态（全选/半选/未选）
+  const headCbRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!headCbRef.current) return;
+    const n = filtered.length;
+    const s = filtered.filter((e) => sel.has(e.path)).length;
+    headCbRef.current.checked = n > 0 && s === n;
+    headCbRef.current.indeterminate = s > 0 && s < n;
+  }, [sel, filtered]);
+
+  // Ctrl/Cmd+A 全选（仅批量模式内生效——0.3.8 需求4；且焦点不在输入框）
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (!(ev.ctrlKey || ev.metaKey) || ev.key.toLowerCase() !== "a") return;
+      if (!bulk) return;
+      const t = ev.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (document.querySelector(".modal-mask, .ctx-menu, .viewer")) return;
+      ev.preventDefault();
+      selectAll();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, bulk]);
 
   const crumbs = dirParts(p.path);
   const readOnly = p.anonymous;
@@ -150,7 +402,7 @@ export default function FileView(p: Props) {
         </button>
       )}
       {!e.isDir && (
-        <button className="mini" title="预览" onClick={(ev) => { ev.stopPropagation(); p.onOpen(e); }}>
+        <button className="mini" title="预览" onClick={(ev) => { ev.stopPropagation(); p.onPreview(e); }}>
           <IconEye size={14} />
         </button>
       )}
@@ -191,7 +443,19 @@ export default function FileView(p: Props) {
     <table className="table" onClick={(ev) => ev.stopPropagation()}>
       <thead>
         <tr>
-          <th style={{ width: "42%" }}>名称</th>
+          {/* 0.3.7 需求5 复选框列（0.3.8 需求5…需求4 改版：仅批量模式显示） */}
+          {bulk && (
+            <th style={{ width: 30 }}>
+              <input
+                ref={headCbRef}
+                type="checkbox"
+                className="row-check"
+                title="全选/清空本列筛选结果"
+                onChange={() => (headCbRef.current?.checked ? selectAll() : clearSel())}
+              />
+            </th>
+          )}
+          <th style={{ width: "40%" }}>名称</th>
           <th>大小</th>
           <th>修改时间</th>
           <th style={{ width: 170 }}>操作</th>
@@ -202,15 +466,35 @@ export default function FileView(p: Props) {
           <tr
             key={e.path}
             className={sel.has(e.path) ? "row selected" : "row"}
-            onClick={(ev) => toggle(e, ev.ctrlKey || ev.metaKey)}
+            onClick={(ev) => toggle(e, bulk && (ev.ctrlKey || ev.metaKey), bulk && ev.shiftKey)}
             onDoubleClick={() => p.onOpen(e)}
             onContextMenu={(ev) => {
               if (!p.onCtxEntry) return;
               ev.preventDefault();
               p.onCtxEntry(e, ev.clientX, ev.clientY);
             }}
-            title={e.isDir ? "双击打开；Ctrl+单击多选；右键菜单" : "双击预览；Ctrl+单击多选；右键菜单"}
+            title={
+              (e.isDir
+                ? "双击打开；单击选择"
+                : viewableType(e)
+                  ? "双击查看；单击选择"
+                  : "双击预览；单击选择") +
+              (bulk ? "，Shift+单击范围选，Ctrl+单击加选" : "（点［批量操作］进入多选）") +
+              "；右键菜单"
+            }
           >
+            {bulk && (
+              <td>
+                <input
+                  type="checkbox"
+                  className="row-check"
+                  checked={sel.has(e.path)}
+                  onClick={(ev) => ev.stopPropagation()}
+                  onChange={() => toggleOne(e)}
+                  title="勾选加入批量选择"
+                />
+              </td>
+            )}
             <td className="cell-name">
               <span className={`ficon k-${e.kind}`}>{kindIcon(e.kind)}</span>
               <span className="fname">{e.name}</span>
@@ -225,7 +509,7 @@ export default function FileView(p: Props) {
   );
 
   return (
-    <div className="page">
+    <div className="page" ref={pageRef}>
       <div className="crumbs">
         <button className="crumb" onClick={() => p.onBreadcrumb("")}>
           <IconHome size={14} /> {p.rootName}
@@ -265,6 +549,25 @@ export default function FileView(p: Props) {
         <button className="btn" disabled={readOnly || !selEntries.length} title={roTip} onClick={() => p.onCopyMove(selEntries, "move")}>
           <IconMove size={15} /> 移动
         </button>
+        {/* 0.3.8 需求4：批量操作显式开关 + 状态条（仅批量模式） */}
+        <button
+          className={bulk ? "btn small primary" : "btn small"}
+          title={bulk ? "退出批量操作（清空选择）" : "进入批量操作：复选框多选、Shift 范围选、Ctrl+A 全选"}
+          onClick={toggleBulk}
+        >
+          <IconLayers size={13} /> {bulk ? "退出批量" : "批量操作"}
+        </button>
+        {bulk && selEntries.length > 0 && (
+          <span className="sel-count">
+            已选 <b>{selEntries.length}</b> 项
+            <button className="btn small" title="Ctrl+A 全选筛选结果" onClick={selectAll}>
+              全选
+            </button>
+            <button className="btn small" onClick={clearSel}>
+              取消选择
+            </button>
+          </span>
+        )}
         <div className="spacer" />
         {p.caps.acl && !readOnly && (
           <button className="btn" title="当前目录权限与分享设置" onClick={() => p.onAcl(null)}>
@@ -355,7 +658,17 @@ export default function FileView(p: Props) {
                   {kindLabel[kind] ?? kind} · {list.length}
                 </div>
                 {p.viewMode === "grid" ? (
-                  <FileGrid entries={list} sel={sel} thumbs={thumbs} onToggle={toggle} onOpen={p.onOpen} onCtx={p.onCtxEntry} />
+                  <FileGrid
+                    entries={list}
+                    sel={sel}
+                    thumbs={thumbs}
+                    tkeyOf={thumbKeyOf}
+                    bulk={bulk}
+                    onToggle={toggle}
+                    onOpen={p.onOpen}
+                    onPreview={p.onPreview}
+                    onCtx={p.onCtxEntry}
+                  />
                 ) : (
                   listBody(list)
                 )}
@@ -364,7 +677,17 @@ export default function FileView(p: Props) {
           </div>
         ) : p.viewMode === "grid" ? (
           <div onClick={(ev) => ev.stopPropagation()}>
-            <FileGrid entries={filtered} sel={sel} thumbs={thumbs} onToggle={toggle} onOpen={p.onOpen} onCtx={p.onCtxEntry} />
+            <FileGrid
+              entries={filtered}
+              sel={sel}
+              thumbs={thumbs}
+              tkeyOf={thumbKeyOf}
+              bulk={bulk}
+              onToggle={toggle}
+              onOpen={p.onOpen}
+              onPreview={p.onPreview}
+              onCtx={p.onCtxEntry}
+            />
           </div>
         ) : (
           listBody(filtered)

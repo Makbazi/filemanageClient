@@ -16,6 +16,7 @@ import type {
 import type { DataSource } from "./datasource";
 import { LocalSource } from "./local";
 import { ServerSource, srvCall } from "./server";
+import { setThumbBudgetMb } from "./thumbcache";
 import { AuthError } from "./errors";
 
 export { AuthError };
@@ -35,10 +36,15 @@ function defaultConfig(): AppConfig {
       sidebarCollapsed: true,
       restoreSessions: true,
       lastServerId: null,
+      closeAction: "tray",
+      videoDecoder: "system",
+      videoPlayerCmd: "",
+      ffmpegPath: "",
     },
     transfer: { uploadLimitKbps: 0, downloadLimitKbps: 0 },
     trashRetentionDays: 30,
     credentials: [],
+    cache: { maxDiskMb: 10240, maxMemMb: 2048, dir: null },
   };
 }
 
@@ -56,11 +62,13 @@ function normalize(c: AppConfig): AppConfig {
     ui: { ...base.ui, ...(c.ui ?? {}) },
     transfer: { ...base.transfer, ...(c.transfer ?? {}) },
     trashRetentionDays: c.trashRetentionDays && c.trashRetentionDays > 0 ? c.trashRetentionDays : 30,
+    cache: { ...base.cache, ...(c.cache ?? {}) },
   };
 }
 
 export async function loadConfig(): Promise<AppConfig> {
   cfg = normalize((await invoke("get_config")) as AppConfig);
+  setThumbBudgetMb(cfg.cache.maxMemMb); // 0.3.2：缩略图内存 LRU 预算随配置生效
   return cfg;
 }
 
@@ -70,6 +78,7 @@ export function getConfig(): AppConfig {
 
 export async function saveConfig(next: AppConfig): Promise<AppConfig> {
   cfg = normalize((await invoke("save_config", { config: next })) as AppConfig);
+  setThumbBudgetMb(cfg.cache.maxMemMb);
   return cfg;
 }
 
@@ -127,7 +136,7 @@ export async function serverLogin(serverId: string, username: string, password: 
   return r;
 }
 
-// ---------- 记住的账户密码（0.6.0 需求3） ----------
+// ---------- 记住的账户密码（需求3） ----------
 
 /** 取回某服务端某账户已记住的密码（未记住/无凭证库时 null）。 */
 export function credTake(serverId: string, username: string): Promise<string | null> {
@@ -154,6 +163,137 @@ export async function serverChangePassword(oldPassword: string, newPassword: str
   await loadConfig();
   invalidateSource();
   return r;
+}
+
+// ---------- 外部播放器（0.3.0 需求1） ----------
+
+/** 用外部播放器/系统关联打开媒体缓存文件（参数为 mediaCache() 返回的绝对路径）。 */
+export async function openMedia(path: string): Promise<void> {
+  await invoke("open_media", { path });
+}
+
+/** 设置页测试外部播放器命令，返回实际打开的探测文件路径（可能是 0 字节样本）。 */
+export async function testPlayerCommand(command: string): Promise<string> {
+  return invoke("test_player_command", { command }) as Promise<string>;
+}
+
+// ---------- ffmpeg 转码播放（0.3.3 需求3） ----------
+
+/** 探测配置的 ffmpeg 可用性（设置页），成功返回版本首行；失败抛可读错误。 */
+export async function ffmpegProbe(): Promise<string> {
+  return invoke("ffmpeg_probe") as Promise<string>;
+}
+
+/** 媒体缓存视频 → 窗口内可播路径：容器 WebView 可直放时原路返回
+ *  （force=false）；否则 ffmpeg 转码 H.264 MP4 入媒体缓存（产物复用，
+ *  受磁盘 LRU 上限）。force=true 强制转码（系统解码失败兜底——容器
+ *  友好但编码不受支持的场景）。本命令不产生任何传输事件。 */
+export async function ffmpegPlayable(path: string, force = false): Promise<string> {
+  return invoke("ffmpeg_playable", { path, force: force ? true : null }) as Promise<string>;
+}
+
+/** 0.3.6（H.265 修复）：媒体缓存视频首轨编码探测——`ffmpeg -i` 窥真实编码
+ *  （毫秒级；正向结果 Rust 侧缓存）。返回如 "hevc"/"h264"；空串=判不了
+ *  （ffmpeg 未配置/无视频轨）。不产生任何传输事件。 */
+export async function videoCodecProbe(path: string): Promise<string> {
+  return invoke("video_codec_probe", { path }) as Promise<string>;
+}
+
+/** 0.3.7 需求1：媒体缓存视频 → {codec, duration(秒，0=未知), audio(有无音轨),
+ *  fps(标称帧率，0=未知——0.3.8 渲染档批量节拍)}（一次 `ffmpeg -i` 窥探、正向缓存；
+ *  渲染档时间轴与转码进度分母同源）。 */
+export interface VideoMediaInfo {
+  codec: string;
+  duration: number;
+  audio: boolean;
+  fps?: number;
+}
+export async function videoMediaInfo(path: string): Promise<VideoMediaInfo> {
+  return invoke("video_media_info", { path }) as Promise<VideoMediaInfo>;
+}
+
+/** 0.3.7 需求1：取消进行中的 ffmpeg 转码（Rust 侧 kill + 清 .part；无在飞作业幂等
+ *  静默成功）。进度经 "fm-ffmpeg" 事件透出（{key,path,status,secs,total,pct}）。 */
+export async function ffmpegCancel(path: string): Promise<void> {
+  await invoke("ffmpeg_cancel", { path });
+}
+
+/** 0.3.7 需求3 渲染档：按需解一帧 JPEG（不落盘；Rust 侧 0.25s 时间桶小缓存）。
+ *  返回 ArrayBuffer（同 media_read_bytes 通道纪律——CSP 零改动）。 */
+export async function ffmpegFrameBytes(path: string, time: number, maxh = 540): Promise<ArrayBuffer> {
+  return invoke("ffmpeg_frame", { path, time, maxh }) as Promise<ArrayBuffer>;
+}
+
+/** 0.3.8 需求2 渲染档提速主通道：一次 ffmpeg 进程**批量连续解码**从 time 起的
+ *  count 帧（按 fps 重采样），返回切好的 JPEG 帧数组（ArrayBuffer→Blob→
+ *  createImageBitmap 由调用侧做）。顺序解码免逐帧起进程+逐帧 seek，帧率可到源帧率。 */
+export async function ffmpegFramesBatch(
+  path: string,
+  time: number,
+  count: number,
+  fps: number,
+  maxh = 540
+): Promise<ArrayBuffer[]> {
+  const buf = (await invoke("ffmpeg_frames", { path, time, count, fps, maxh })) as ArrayBuffer;
+  const dv = new DataView(buf);
+  const out: ArrayBuffer[] = [];
+  let off = 0;
+  while (off + 4 <= buf.byteLength) {
+    const len = dv.getUint32(off, true);
+    off += 4;
+    if (len === 0 || off + len > buf.byteLength) break;
+    out.push(buf.slice(off, off + len));
+    off += len;
+  }
+  return out;
+}
+
+/** 0.3.7 需求3 渲染档：抽取音轨为媒体缓存内 `<key>.audio.m4a`（存在即复用）。
+ *  无音轨抛错 "无音轨"——调用侧退化内部时钟静音播放。 */
+export async function ffmpegAudioTrack(path: string): Promise<string> {
+  return invoke("ffmpeg_audio_track", { path }) as Promise<string>;
+}
+
+// ---------- 媒体缓存出图 URL 与缓存目录管理（0.3.8 需求5） ----------
+
+/** 媒体缓存文件 → webview 可加载 URL。**统一走 fmc 自定义协议**（Rust 守卫=
+ *  当前媒体缓存目录内 + Range 支持）：缓存目录已可重定位到任意路径，asset
+ *  协议静态 scope（$APPCACHE/**）覆盖不到；且协议形态按平台不同——
+ *  Linux/macOS `fmc://localhost/…`、Windows `http://fmc.localhost/…`（UA 分流）。
+ *  取代 0.3.7 及以前的 convertFileSrc（查看/预览/音频/渲染音轨四处）。 */
+const IS_WINDOWS_UA = /windows|win32|win64/i.test(navigator.userAgent);
+export function mediaUrl(path: string): string {
+  const enc = encodeURIComponent(path);
+  return IS_WINDOWS_UA ? `http://fmc.localhost/m?p=${enc}` : `fmc://localhost/m?p=${enc}`;
+}
+
+export interface CacheDirInfo {
+  dir: string;
+  defaultDir: string;
+  isDefault: boolean;
+  files: number;
+  bytes: number;
+}
+
+/** 缓存目录信息（设置页展示：当前目录/默认目录/是否自定义/条目与占用）。 */
+export async function cacheDirInfo(): Promise<CacheDirInfo> {
+  return invoke("cache_dir_info") as Promise<CacheDirInfo>;
+}
+
+/** 切换/迁移媒体缓存目录（0.3.8 需求5）：dir 传空串=恢复默认目录；
+ *  migrate=true 时尽力搬运旧条目（rename 跨卷退化 copy+删源，单条失败不阻断，
+ *  缺失条目按需重建）。命令内含配置落盘 + fm-config-changed 广播。 */
+export async function cacheSetDir(
+  dir: string,
+  migrate: boolean
+): Promise<{ dir: string; isDefault: boolean; moved: number; failed: number; noop: boolean }> {
+  return invoke("cache_set_dir", { dir, migrate }) as Promise<{
+    dir: string;
+    isDefault: boolean;
+    moved: number;
+    failed: number;
+    noop: boolean;
+  }>;
 }
 
 export function fetchRoots(serverId: string): Promise<ServerRoot[]> {

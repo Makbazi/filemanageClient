@@ -18,7 +18,9 @@ pub struct RootConf {
 }
 
 /// 已配置的服务端（可配置多个）。
-/// token 为短期访问令牌；refresh_token 用于自动续期（需求22：3 周滑动会话）。
+/// token = 单一无透明随机凭证（0.2.4 认证契约：活跃滑动续期由服务端无感完成、
+/// 凭证串不变；闲置超 1h 或客户端退出 → 重新登录换新凭证；有记住密码时自动
+/// 重登）。旧版 refreshToken 字段已移除（加载旧 config.json 时该键被忽略）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerConf {
@@ -29,14 +31,35 @@ pub struct ServerConf {
     pub username: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
-    #[serde(default)]
-    pub refresh_token: Option<String>,
     /// 信任自签证书（服务端 TLS 使用自签证书时开启，需求3）
     #[serde(default)]
     pub insecure_tls: bool,
-    /// 指定 CA 证书文件路径（PEM，0.4.0 安全升级：优先于 insecure_tls，避免全盘跳过校验）
+    /// 指定 CA 证书文件路径（PEM：优先于 insecure_tls，避免全盘跳过校验）
     #[serde(default)]
     pub ca_file: Option<String>,
+}
+
+impl ServerConf {
+    /// 地址归一（0.1.3 修复）：去首尾空白；缺协议头的裸 `host[:port][/路径]` 按 `http://` 补全。
+    /// 缺 scheme 时 reqwest 的 URL 解析直接失败，但 Display 只有 "builder error" 一行，
+    /// 与网络故障无法区分；补全走明文 http——前端保存该形态时已二次确认风险。
+    pub(crate) fn norm_base(url: &str) -> String {
+        let t = url.trim();
+        if t.is_empty() {
+            return String::new();
+        }
+        let lower = t.to_ascii_lowercase();
+        if lower.starts_with("http://") || lower.starts_with("https://") {
+            t.to_string()
+        } else {
+            format!("http://{t}")
+        }
+    }
+
+    /// 拼接请求 URL 用的基础地址：归一 + 去尾部 '/'。
+    pub fn normalized_base(&self) -> String {
+        Self::norm_base(&self.base_url).trim_end_matches('/').to_string()
+    }
 }
 
 /// AI 能力配置（云厂商 OpenAI 兼容接口 / 本地 ollama）。
@@ -87,7 +110,7 @@ pub struct LastLocation {
     pub view_mode: String, // list | grid
 }
 
-/// 已"记住密码"的服务端账户索引（0.6.0 需求3）。密码本体存系统凭证库
+/// 已"记住密码"的服务端账户索引（需求3）。密码本体存系统凭证库
 /// （key 为 {serverId}/{username}/password），config.json 只存非敏感索引；
 /// 同一服务端可有多条（多账户），同一账户配到不同服务端按 serverId 隔离。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,17 +138,36 @@ pub struct UiConf {
     /// 按文件类型分组显示（需求15）
     #[serde(default)]
     pub group_by_kind: bool,
-    /// 左侧导航栏是否折叠为小箭头标签（0.4.0；默认折叠，点击标签显隐）
+    /// 左侧导航栏是否折叠为小箭头标签（默认折叠，点击标签显隐）
     #[serde(default = "default_true")]
     pub sidebar_collapsed: bool,
-    /// 启动时是否恢复各服务端登录状态（0.6.0 需求9）。
+    /// 启动时是否恢复各服务端登录状态（需求9）。
     /// true（默认）：上次保持登录的服务端重启后仍为登录态，可直接打开远程；
     /// false：启动时清除全部令牌，所有服务端置为退出状态（已记住的密码保留）。
     #[serde(default = "default_true")]
     pub restore_sessions: bool,
-    /// 快速切换第二按钮指向的远程服务端 id（0.6.0 需求10）
+    /// 快速切换第二按钮指向的远程服务端 id（需求10）
     #[serde(default)]
     pub last_server_id: Option<String>,
+    /// 关闭按钮(X)行为（0.3.0 需求2）：tray=隐藏到托盘（默认；托盘不可用环境
+    /// 自动退回退出）| quit=退出程序
+    #[serde(default = "default_close_action")]
+    pub close_action: String,
+    /// 视频播放方式（0.3.0 需求1；0.3.3 增 ffmpeg 档）：system=WebView 内 <video>
+    /// 走系统解码器（默认；解码失败时查看器提示，可一键外部播放器或 ffmpeg 转码）
+    /// | ffmpeg=经用户配置的 ffmpeg 转码 H.264 MP4 后窗口内播放（产物入媒体缓存复用）
+    /// | external=外部播放器
+    #[serde(default = "default_video_decoder")]
+    pub video_decoder: String,
+    /// 外部播放器命令（0.3.0；空=系统关联播放器）。argv 直起不经 shell，
+    /// 含 `{file}` 则替换为文件路径，否则路径追加为末位参数；路径含空格请为命令加引号
+    #[serde(default)]
+    pub video_player_cmd: Option<String>,
+    /// ffmpeg 可执行文件路径（0.3.3 需求3；空=PATH 探测 "ffmpeg"）。
+    /// "ffmpeg 转码"播放档与系统解码失败面板的"用 ffmpeg 转码播放"兜底都走本配置；
+    /// 不内嵌 ffmpeg，由用户自备（Windows 也可指向 ffmpeg.exe 全路径）
+    #[serde(default)]
+    pub ffmpeg_path: Option<String>,
 }
 
 fn default_theme() -> String {
@@ -140,6 +182,12 @@ fn default_true() -> bool {
 fn default_trash_days() -> i64 {
     30
 }
+fn default_close_action() -> String {
+    "tray".into()
+}
+fn default_video_decoder() -> String {
+    "system".into()
+}
 
 impl Default for UiConf {
     fn default() -> Self {
@@ -152,6 +200,10 @@ impl Default for UiConf {
             sidebar_collapsed: true,
             restore_sessions: true,
             last_server_id: None,
+            close_action: default_close_action(),
+            video_decoder: default_video_decoder(),
+            video_player_cmd: None,
+            ffmpeg_path: None,
         }
     }
 }
@@ -164,6 +216,43 @@ pub struct TransferConf {
     pub upload_limit_kbps: u32,
     #[serde(default)]
     pub download_limit_kbps: u32,
+}
+
+/// 媒体/缩略图缓存配额（0.3.2 需求3/4/5）：
+/// - 磁盘：媒体缓存目录（缩略图/预览/查看落盘）总上限，Rust LRU 按 mtime 淘汰执行；
+///   跨程序退出保留复用（设置页可手动清空）。
+/// - 内存：缩略图字节 blob 缓存预算，前端 thumbcache.ts 读取执行。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheConf {
+    /// 磁盘缓存上限 MB（默认 10240 = 10GB）
+    #[serde(default = "default_cache_disk_mb")]
+    pub max_disk_mb: u64,
+    /// 缩略图内存缓存上限 MB（默认 2048 = 2GB）
+    #[serde(default = "default_cache_mem_mb")]
+    pub max_mem_mb: u64,
+    /// 媒体/缩略图缓存目录（0.3.8 需求5）：空=默认 `<app_cache_dir>/media`；
+    /// 可改到任意可写目录（迁移在设置页触发）。自定义目录经 fmc:// 自定义
+    /// 协议出图（asset 协议静态 scope 覆盖不到；守卫见 lib.rs::fmc_protocol）。
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+fn default_cache_disk_mb() -> u64 {
+    10240
+}
+fn default_cache_mem_mb() -> u64 {
+    2048
+}
+
+impl Default for CacheConf {
+    fn default() -> Self {
+        Self {
+            max_disk_mb: default_cache_disk_mb(),
+            max_mem_mb: default_cache_mem_mb(),
+            dir: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -181,12 +270,20 @@ pub struct AppConfig {
     pub ui: UiConf,
     #[serde(default)]
     pub transfer: TransferConf,
-    /// 本地回收站自动清理保留天数（0.4.0，需求：与服务端各自独立的 30 天清理）
+    /// 本地回收站自动清理保留天数（需求：与服务端各自独立的 30 天清理）
     #[serde(default = "default_trash_days")]
     pub trash_retention_days: i64,
-    /// 已记住密码的服务端账户索引（0.6.0 需求3；密码本体在系统凭证库）
+    /// 已记住密码的服务端账户索引（需求3；密码本体在系统凭证库）
     #[serde(default)]
     pub credentials: Vec<CredRef>,
+    /// 媒体/缩略图缓存配额（0.3.2 需求3/4/5）
+    #[serde(default)]
+    pub cache: CacheConf,
+    /// 客户端唯一标识（0.2.4 认证契约）：本机安装首次启动生成的 UUIDv4，
+    /// 登录时随凭证绑定（服务端逐请求核对 X-Client-Id 头）；多客户端同账号
+    /// 各持己凭证互不挤占。非机密（身份标识，明文存 config.json）。
+    #[serde(default)]
+    pub client_id: String,
 }
 
 impl Default for AppConfig {
@@ -200,17 +297,30 @@ impl Default for AppConfig {
             transfer: TransferConf::default(),
             trash_retention_days: default_trash_days(),
             credentials: Vec::new(),
+            cache: CacheConf::default(),
+            client_id: String::new(),
         }
     }
 }
 
+/// 进程内客户端唯一标识（启动时从配置装载；空=尚未生成/加载）。
+static CLIENT_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 取客户端唯一标识（HTTP 层 X-Client-Id 头与登录体共用）。
+pub fn client_id() -> &'static str {
+    CLIENT_ID.get().map(|s| s.as_str()).unwrap_or("")
+}
+
+fn set_client_id(id: &str) {
+    let _ = CLIENT_ID.set(id.to_string());
+}
+
 impl AppConfig {
-    /// 副本：清空服务端令牌——令牌存系统凭证库后 config.json 不再落盘明文（0.4.0）。
+    /// 副本：清空服务端令牌——令牌存系统凭证库后 config.json 不再落盘明文。
     pub fn without_tokens(&self) -> AppConfig {
         let mut c = self.clone();
         for s in c.servers.iter_mut() {
             s.token = None;
-            s.refresh_token = None;
         }
         c
     }
@@ -224,27 +334,39 @@ pub struct AppState {
     /// 本地元数据库（localdb.sqlite3）。rusqlite Connection 为 Send 非 Sync，用 Mutex 保护；
     /// 取锁仅限同步段，禁止跨 .await 持有。
     pub db: std::sync::Mutex<rusqlite::Connection>,
-    /// 系统凭证库可用性（true 时 token 存 keyring，config.json 不落盘明文；0.4.0）。
+    /// 系统凭证库可用性（true 时 token 存 keyring，config.json 不落盘明文）。
     pub keyring_ok: bool,
 }
 
 impl AppState {
     pub fn load(data_dir: PathBuf, cache_dir: PathBuf) -> Result<Self, String> {
         let mut cfg = read_config(&data_dir).unwrap_or_default();
+        // 0.1.3 修复：旧 config.json 的服务端地址可能缺协议头（裸 host:port，reqwest 报
+        // 不透明的 "builder error"）；启动即归一补 http://——Rust 请求路径与前端消费者
+        // （分享链接拼接等）共用同一权威值，下一次 save_config 自然落盘修正。
+        for s in cfg.servers.iter_mut() {
+            s.base_url = ServerConf::norm_base(&s.base_url);
+        }
+        // 0.2.4：客户端唯一标识——首次启动生成 UUIDv4 并持久化（本机安装维度
+        // 稳定；登录绑定 + 逐请求 X-Client-Id 头）。
+        let id_changed = cfg.client_id.is_empty();
+        if id_changed {
+            cfg.client_id = uuid::Uuid::new_v4().to_string();
+        }
+        set_client_id(&cfg.client_id);
+        if id_changed {
+            write_config(&data_dir, &cfg.without_tokens())?;
+        }
         let keyring_ok = crate::secret::available();
         if keyring_ok {
             let mut migrated = false;
             for s in cfg.servers.iter_mut() {
-                if s.token.is_some() || s.refresh_token.is_some() {
+                if s.token.is_some() {
                     // 旧版明文 token → 一次性迁移进凭证库（config.json 稍后脱敏回写）
-                    let _ = crate::secret::set_tokens(&s.id, s.token.as_deref(), s.refresh_token.as_deref());
+                    let _ = crate::secret::set_tokens(&s.id, s.token.as_deref());
                     migrated = true;
-                } else {
-                    let (t, r) = crate::secret::get_tokens(&s.id);
-                    if t.is_some() || r.is_some() {
-                        s.token = t;
-                        s.refresh_token = r;
-                    }
+                } else if let Some(t) = crate::secret::get_tokens(&s.id) {
+                    s.token = Some(t);
                 }
             }
             if migrated {
@@ -253,16 +375,15 @@ impl AppState {
         } else {
             eprintln!("提示: 系统凭证库不可用，服务端令牌将以明文存于 config.json（建议启用 Keychain/Keyring/Secret Service）");
         }
-        // 0.6.0 需求9：关闭"启动恢复登录状态"时，上次保持登录的服务端在启动时一律置为退出
+        // 需求9：关闭"启动恢复登录状态"时，上次保持登录的服务端在启动时一律置为退出
         // （清内存令牌 + 凭证库令牌；已记住的密码保留，供下次快速登录）。
         if !cfg.ui.restore_sessions {
-            let had = cfg.servers.iter().any(|s| s.token.is_some() || s.refresh_token.is_some());
+            let had = cfg.servers.iter().any(|s| s.token.is_some());
             if had {
                 for s in cfg.servers.iter_mut() {
                     s.token = None;
-                    s.refresh_token = None;
                     if keyring_ok {
-                        let _ = crate::secret::set_tokens(&s.id, None, None);
+                        let _ = crate::secret::set_tokens(&s.id, None);
                     }
                 }
                 let out = if keyring_ok { cfg.without_tokens() } else { cfg.clone() };
@@ -271,13 +392,17 @@ impl AppState {
         }
         let _ = std::fs::create_dir_all(cache_dir.join("media"));
         let db = crate::localdb::open_and_migrate(&data_dir)?;
-        Ok(Self {
+        let st = Self {
             data_dir,
             cache_dir,
             config: RwLock::new(cfg),
             db: std::sync::Mutex::new(db),
             keyring_ok,
-        })
+        };
+        // 0.3.8 需求5：自定义缓存目录也要存在（配置了不可写路径时静默失败，
+        // 写点自然报错回退重建；启动绝不因缓存目录炸掉）
+        let _ = std::fs::create_dir_all(st.media_cache_dir());
+        Ok(st)
     }
 
     pub fn config(&self) -> AppConfig {
@@ -292,12 +417,12 @@ impl AppState {
         let mut guard = self.config.write().expect("config lock");
         let prev_ids: Vec<String> = guard.servers.iter().map(|s| s.id.clone()).collect();
         let prev_creds: Vec<CredRef> = guard.credentials.clone();
-        // 0.6.0（需求1）：记录变更前的令牌，keyring 只写真正变化的条目——
+        // 需求1：记录变更前的令牌，keyring 只写真正变化的条目——
         // 前端位置持久化每 ~800ms 触发一次 save，全量重写会造成 Secret Service IPC 风暴。
-        let prev_tokens: Vec<(String, Option<String>, Option<String>)> = guard
+        let prev_tokens: Vec<(String, Option<String>)> = guard
             .servers
             .iter()
-            .map(|s| (s.id.clone(), s.token.clone(), s.refresh_token.clone()))
+            .map(|s| (s.id.clone(), s.token.clone()))
             .collect();
         f(&mut guard);
         let snapshot = guard.clone();
@@ -322,14 +447,12 @@ impl AppState {
             }
             let mut ring_err = String::new();
             for s in &snapshot.servers {
-                let changed = match prev_tokens.iter().find(|(id, _, _)| *id == s.id) {
-                    None => s.token.is_some() || s.refresh_token.is_some(),
-                    Some((_, pt, pr)) => pt != &s.token || pr != &s.refresh_token,
+                let changed = match prev_tokens.iter().find(|(id, _)| *id == s.id) {
+                    None => s.token.is_some(),
+                    Some((_, pt)) => pt != &s.token,
                 };
                 if changed {
-                    if let Err(e) =
-                        crate::secret::set_tokens(&s.id, s.token.as_deref(), s.refresh_token.as_deref())
-                    {
+                    if let Err(e) = crate::secret::set_tokens(&s.id, s.token.as_deref()) {
                         ring_err = e;
                     }
                 }
@@ -374,8 +497,21 @@ impl AppState {
         self.data_dir.join("versions")
     }
 
-    /// 媒体预览缓存目录（asset 协议已授权该目录）。
+    /// 媒体预览缓存目录（0.3.8 需求5：cache.dir 可重定位，空=默认
+    /// `<app_cache_dir>/media`）。默认目录同时受 asset 协议授权；自定义目录
+    /// 经 fmc:// 自定义协议出图（lib.rs::fmc_protocol，守卫=本目录内文件）。
     pub fn media_cache_dir(&self) -> PathBuf {
+        let d = self.config().cache.dir.clone().unwrap_or_default();
+        let d = d.trim();
+        if d.is_empty() {
+            self.cache_dir.join("media")
+        } else {
+            PathBuf::from(d)
+        }
+    }
+
+    /// 默认媒体缓存目录（设置页展示"恢复默认"目标用）。
+    pub fn media_cache_dir_default(&self) -> PathBuf {
         self.cache_dir.join("media")
     }
 }

@@ -25,6 +25,62 @@ export async function srvCall<T = unknown>(
   }
 }
 
+/** 服务端是否报"端点不存在"（需求41 mkdirs 兼容退化判定）。
+ * gin NoRoute 信封 {error:"not found: /api/v1/mkdirs"}，Rust api_error 只透传 error 文本；
+ * 非 JSON 响应体时为 "HTTP 404"/"HTTP 405"。新服务端 mkdirs 自身永不返回 404，误判安全。 */
+export function isMissingEndpoint(e: unknown): boolean {
+  const s = String(e);
+  return /not found/i.test(s) || /HTTP (404|405)/.test(s);
+}
+
+/** 需求41：批量建远端目录（服务端 0.2.0 起提供 POST /api/v1/mkdirs，1000 条上限、
+ * 1MB JSON 限内，客户端按 500/批）。旧服务端（<0.2.0）报端点不存在 → 该批退化为
+ * 逐路径 POST /api/v1/mkdir（幂等 MkdirAll 递归，数量受 fs_walk 上限约束，串行可接受）；
+ * 其他错误原样抛出，由调用方决定中止。 */
+export async function serverMkdirs(serverId: string, rootId: string, paths: string[]): Promise<void> {
+  const BATCH = 500;
+  for (let i = 0; i < paths.length; i += BATCH) {
+    const batch = paths.slice(i, i + BATCH);
+    try {
+      await srvCall(serverId, "POST", "/api/v1/mkdirs", { rootId, paths: batch });
+    } catch (e) {
+      if (!isMissingEndpoint(e)) throw e;
+      for (const p of batch) await srvCall(serverId, "POST", "/api/v1/mkdir", { rootId, path: p });
+    }
+  }
+}
+
+// ---------- 0.3.2 目录重传预检（POST /api/v1/check，Server ≥0.2.1） ----------
+
+export interface CheckFile {
+  path: string;
+  size: number;
+  hash?: string;
+}
+
+export type CheckState = "missing" | "same" | "differ" | "unknown";
+
+export interface CheckResult {
+  path: string;
+  state: CheckState;
+}
+
+/** 批量校验远端文件（相同跳过/不同询问的服务端支撑）。500/批同 mkdirs 骨架。
+ *  端点缺失（旧服务端）由调用方经 isMissingEndpoint 判定后退化为无预检旧流程。 */
+export async function serverCheck(serverId: string, rootId: string, files: CheckFile[]): Promise<CheckResult[]> {
+  const BATCH = 500;
+  const out: CheckResult[] = [];
+  for (let i = 0; i < files.length; i += BATCH) {
+    const batch = files.slice(i, i + BATCH).map((f) => (f.hash ? f : { path: f.path, size: f.size }));
+    const d = await srvCall<{ results?: CheckResult[] }>(serverId, "POST", "/api/v1/check", {
+      rootId,
+      files: batch,
+    });
+    out.push(...(d.results ?? []));
+  }
+  return out;
+}
+
 interface ServerFileVersion {
   id: number;
   versionNo: number;
@@ -118,27 +174,38 @@ export class ServerSource implements DataSource {
   }
 
   mediaCache(entry: FsEntry): Promise<string> {
+    // ver=entry.mtime：缓存键含版本串，覆盖后自动重拉（0.1.7 图片也走本通道）
     return invoke("srv_media_cache", {
       serverId: this.serverId,
       rootId: this.rootId,
       path: entry.path,
+      ver: String(entry.mtime),
     }) as Promise<string>;
   }
 
-  async thumbData(entry: FsEntry): Promise<string | null> {
-    if (entry.kind !== "image" || entry.size > 4 << 20) return null;
-    try {
-      return (await invoke("srv_thumb", {
-        serverId: this.serverId,
-        rootId: this.rootId,
-        path: entry.path,
-      })) as string;
-    } catch {
-      return null;
-    }
+  thumbPath(entry: FsEntry): Promise<string | null> {
+    // 0.3.6（浏览零整文件定版）：Rust 走服务端 GET /thumb（只回 ≤512px JPEG，
+    // 几十 KB——打开图片目录不再拉取任何原图字节）。415/413/403/404=永久无图
+    // （null 直接落图标；含 ≤0.2.0 旧服务端 404——废除旧"整文件静默入缓存本地
+    // 缩放"兜底）；网络/429/401/5xx=瞬时（抛错，FileView 队列退避重试 ≤3 轮）。
+    // Server ≥0.2.4 起 JPEG/RAW 像素闸门提至 50MP（YCbCr 平面路径），常见手机/
+    // 单反原图仍出服务端小图；图标只剩 webp/heic 等无解码器形态。全量字节只在
+    // 双击查看（mediaCache）或下载（srv_download）时到来。size_hint 参数已移除。
+    return invoke("srv_thumb", {
+      serverId: this.serverId,
+      rootId: this.rootId,
+      path: entry.path,
+      ver: String(entry.mtime),
+    }) as Promise<string | null>;
   }
 
-  async uploadFile(localPath: string, dir: string, transferId: string, baseHash?: string): Promise<void> {
+  async uploadFile(
+    localPath: string,
+    dir: string,
+    transferId: string,
+    baseHash?: string,
+    journal?: { gid: string; rel: string } | null
+  ): Promise<void> {
     await invoke("srv_upload", {
       serverId: this.serverId,
       rootId: this.rootId,
@@ -146,6 +213,8 @@ export class ServerSource implements DataSource {
       localPath,
       transferId,
       baseHash: baseHash ?? null,
+      journalGid: journal?.gid ?? null,
+      journalRel: journal?.rel ?? null,
     });
   }
 

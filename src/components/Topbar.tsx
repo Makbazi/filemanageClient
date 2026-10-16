@@ -1,4 +1,4 @@
-// 顶栏：视图标题 + 快速切换（0.6.0 需求10：本地 + 选中远程两按钮，其余收进"更多"）+ 登录状态。
+// 顶栏：视图标题 + 快速切换（需求10：本地 + 选中远程两按钮，其余收进"更多"）+ 登录状态。
 import { useState } from "react";
 import type { AppConfig } from "../lib/types";
 import type { View } from "./Sidebar";
@@ -25,6 +25,7 @@ const TITLES: Record<View, string> = {
   transfers: "传输",
   ai: "AI 助手",
   search: "搜索",
+  settings: "设置",
 };
 
 export default function Topbar(p: Props) {

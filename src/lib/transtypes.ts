@@ -1,4 +1,4 @@
-// 传输任务共享类型（0.6.0 需求4/5/6）：transfer.ts 任务注册表与传输 UI 共用此契约。
+// 传输任务共享类型（需求4/5/6）：transfer.ts 任务注册表与传输 UI 共用此契约。
 // 状态字符串与 Rust "fm-transfer" 事件的 status 取值一致。
 export type TransferKind = "upload" | "download";
 
@@ -39,4 +39,20 @@ export interface TransferTask {
   /** B/s，0 = 未知。 */
   speed: number;
   message: string;
+  /** 需求41 目录上传：子任务所属组任务 id（有值的任务不出现在 UI 快照，由组行聚合展示）。 */
+  group?: string;
+  /** 需求41：该任务为组聚合行（UI 的 暂停/继续/取消/重试 走组级 API）。 */
+  isGroup?: boolean;
+  /** 需求41：组行已完成（含失败/取消）文件数 与 总文件数。 */
+  files?: number;
+  filesTotal?: number;
+  /** 0.3.2：目录重传预检判定的"相同跳过"文件数（不入队、不占 filesTotal）。 */
+  skipped?: number;
+  /** 0.3.2：组内子任务在上传账本中的 rel_path（组任务 id 即账本 gid；
+   *  Rust srv_upload 据此回写 session_id/终态——重启后"继续未完成的上传组"）。 */
+  journalRel?: string;
+  /** 0.3.5 需求3：右下角传输面板**仅此视图**隐藏该条（终态行"隐藏"按钮置位；
+   *  传输管理页 TransfersView 不受影响、任务注册表不删除）。任务重新进入
+   *  非终态（继续/重试）时由 run 清除，保证面板始终看得见"在动"的任务。 */
+  panelHidden?: boolean;
 }

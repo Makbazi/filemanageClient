@@ -1,23 +1,54 @@
 // 设置：本地目录 / 服务端 / 外观（主题、浏览风格、位置恢复）/ 传输（限速）/ AI 能力 / 用户管理。
+// 0.1.4（需求2）：由浮动模态卡片改为**主区整页视图**（view === "settings"，复用 .page 容器），
+// 左侧导航栏保持可见与可折叠；页内"添加/编辑服务端"表单与明文 http 确认仍为对话框
+// （Modals 遮罩已 portal 到 body，恒浮于本页之上）。
+// 0.1.5：新增"关于"页签（版本信息：应用名/客户端版本/Tauri 版本/配套服务端版本），
+// 页头右侧同时常驻显示版本号——版本一律取 Tauri 运行时元数据（非 import 常量），
+// 因此与 build.sh -V 注入的产物版本一致（该通道不改三处版本源文件）。
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getName, getTauriVersion, getVersion } from "@tauri-apps/api/app";
 import type { AIProvider, AppConfig, RootConf, ServerConf, ServerRoot } from "../lib/types";
 import { uid } from "../lib/types";
-import { active, credForget, fetchRoots, serverCall, serverChangePassword, serverLogout } from "../lib/api";
+import { fmtSize } from "../lib/format";
+import { clearThumbCache } from "../lib/thumbcache";
+import {
+  active,
+  cacheDirInfo,
+  cacheSetDir,
+  credForget,
+  fetchRoots,
+  ffmpegProbe,
+  serverChangePassword,
+  serverLogout,
+  testPlayerCommand,
+  type CacheDirInfo,
+} from "../lib/api";
 import { THEMES } from "../lib/theme";
 import { Confirm, Modal } from "./Modals";
 import { IconPlus, IconTrash, IconPencil } from "./icons";
 
 interface Props {
   cfg: AppConfig;
-  /** 打开时定位的页签（侧栏"用户"按钮直达账户页，0.5.0） */
+  /** 打开时定位的页签（侧栏"用户"按钮直达账户页） */
   initialTab?: Tab;
   onSave(next: AppConfig): Promise<void>;
   onClose(): void;
   onLogin(serverId: string): void;
+  /** 0.3.7 需求6：设置页内下拉切换数据源（本地/服务端一/服务端二）——切换后
+   *  App 侧保持 view==="settings" 不跳回文件页，用户仍停留在本页。 */
+  onSwitchSource(target: { kind: "local"; rootId: string } | { kind: "server"; serverId: string }): Promise<void>;
 }
 
-type Tab = "local" | "servers" | "appearance" | "transfer" | "ai" | "account";
+type Tab = "local" | "servers" | "appearance" | "transfer" | "ai" | "account" | "about";
+
+/** 运行时版本元数据（Tauri app 命令取得；非 Tauri 环境/取用失败时为空串，UI 自行回落） */
+interface AppInfo {
+  name: string;
+  version: string;
+  tauri: string;
+}
 
 export default function Settings(p: Props) {
   const [tab, setTab] = useState<Tab>(p.initialTab ?? "local");
@@ -28,15 +59,78 @@ export default function Settings(p: Props) {
     ai: { ...p.cfg.ai },
     ui: { ...p.cfg.ui },
     transfer: { ...p.cfg.transfer },
+    cache: { ...p.cfg.cache },
   });
   const [saving, setSaving] = useState(false);
+  // 0.3.2：媒体/缩略图缓存用量（进"传输"页签时刷新）与清空状态
+  const [cacheStats, setCacheStats] = useState<{ files: number; bytes: number; limitBytes: number } | null>(null);
+  const [clearing, setClearing] = useState(false);
+  // 0.3.8 需求5：缓存目录显示/切换/迁移状态
+  const [dirInfo, setDirInfo] = useState<CacheDirInfo | null>(null);
+  const [migrateDir, setMigrateDir] = useState(true);
+  const [dirBusy, setDirBusy] = useState(false);
+  const [dirMsg, setDirMsg] = useState("");
+  const [dirErr, setDirErr] = useState("");
   const [srvForm, setSrvForm] = useState<{ idx: number; conf: ServerConf } | null>(null);
-  // 明文 http 保存前的二次确认（0.4.0 安全升级）
+  // 明文 http 保存前的二次确认
   const [httpWarn, setHttpWarn] = useState<ServerConf | null>(null);
+  const [info, setInfo] = useState<AppInfo>({ name: "FileManage", version: "", tauri: "" });
+  // 0.3.0 需求1：外部播放器命令草稿（Enter/失焦提交 uiSet）与测试按钮状态
+  const [playerDraft, setPlayerDraft] = useState(p.cfg.ui.videoPlayerCmd ?? "");
+  const [testMsg, setTestMsg] = useState("");
+  const [testErr, setTestErr] = useState("");
+  // 0.3.3 需求3：ffmpeg 路径草稿（同 Enter/失焦提交）与探测按钮状态
+  const [ffmpegDraft, setFfmpegDraft] = useState(p.cfg.ui.ffmpegPath ?? "");
+  const [ffmMsg, setFfmMsg] = useState("");
+  const [ffmErr, setFfmErr] = useState("");
+  // 0.3.7 需求6：设置页内数据源下拉切换（本地/服务端一/服务端二）——切换中禁用，
+  // 完成后停留本页（App 保证不跳文件页）。
+  const [switching, setSwitching] = useState(false);
+  const cur = active();
+  const sourceVal = cur.kind === "server" ? `server:${cur.serverId ?? ""}` : `local:${cur.rootId ?? ""}`;
+
+  async function switchSource(v: string) {
+    const [kind, id] = v.split(":");
+    if (!id) return;
+    setSwitching(true);
+    try {
+      await p.onSwitchSource(kind === "server" ? { kind: "server", serverId: id } : { kind: "local", rootId: id });
+    } finally {
+      setSwitching(false);
+    }
+  }
+
+  // 版本信息：走 Tauri app 命令（core:app:default 已含 allow-version/allow-name/
+  // allow-tauri-version，无需扩权限），故 -V 覆盖产物版本时这里同步变化；
+  // 纯浏览器预览（非 Tauri 运行时）invoke 失败 → 保留默认名、版本留空由 UI 显示"未知"。
+  useEffect(() => {
+    let cancelled = false;
+    const safe = <T,>(p: Promise<T>, d: T) => p.catch(() => d);
+    void Promise.all([
+      safe(getName(), "FileManage"),
+      safe(getVersion(), ""),
+      safe(getTauriVersion(), ""),
+    ]).then(([name, version, tauri]) => {
+      if (!cancelled) setInfo({ name, version, tauri });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 需求8：外部登录态/凭证变化（fm-config-changed → App cfg → props）同步进内部状态；
   // 编辑中的表单草稿在 srvForm/httpWarn 独立 state，不会被此同步打断。
   useEffect(() => setCfg({ ...p.cfg }), [p.cfg]);
+
+  // Esc 离开设置视图回文件页；页内子对话框（服务端表单/明文 http 确认）打开时让位给
+  // 子对话框自己处理，避免一次 Esc 同时关掉两层（旧版两层 Modal 各挂 window 监听会连带关闭）。
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !srvForm && !httpWarn) p.onClose();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [srvForm, httpWarn, p]);
 
   async function persist(next: AppConfig) {
     setCfg(next);
@@ -87,7 +181,11 @@ export default function Settings(p: Props) {
 
   async function saveSrvForm() {
     if (!srvForm) return;
-    const conf = { ...srvForm.conf, baseUrl: srvForm.conf.baseUrl.replace(/\/+$/, "") };
+    // 0.1.3 修复：裸 host:port 缺协议头会让 reqwest URL 解析失败（报不透明的 "builder error"），
+    // 一律补全为 http://，随后照常走明文 http 的保存二次确认
+    let baseUrl = srvForm.conf.baseUrl.trim().replace(/\/+$/, "");
+    if (baseUrl && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(baseUrl)) baseUrl = `http://${baseUrl}`;
+    const conf = { ...srvForm.conf, baseUrl };
     if (!conf.name || !conf.baseUrl) return;
     // 安全升级：非本机地址的明文 http 传输（口令/文件可被嗅探）需显式二次确认
     if (conf.baseUrl.startsWith("http://") && !isLocalHostUrl(conf.baseUrl)) {
@@ -115,9 +213,123 @@ export default function Settings(p: Props) {
   };
   const trSet = (patch: Partial<AppConfig["transfer"]>) =>
     setCfg({ ...cfg, transfer: { ...cfg.transfer, ...patch } });
+  const cacheSet = (patch: Partial<AppConfig["cache"]>) =>
+    setCfg({ ...cfg, cache: { ...cfg.cache, ...patch } });
+
+  // 0.3.2：进"传输"页签拉一次媒体缓存用量；0.3.8 需求5：连带刷新缓存目录信息
+  useEffect(() => {
+    if (tab !== "transfer") return;
+    invoke<{ files: number; bytes: number; limitBytes: number }>("cache_stats")
+      .then(setCacheStats)
+      .catch(() => setCacheStats(null));
+    void cacheDirInfo().then(setDirInfo).catch(() => setDirInfo(null));
+  }, [tab]);
+
+  // 0.3.8 需求5：切换/迁移/恢复默认缓存目录（命令即时落盘并广播 fm-config-changed，
+  // 不依赖"保存传输设置"按钮；草稿 cfg 同步 dir 防后续保存旧快照冲掉）
+  async function switchCacheDir(to: string | null) {
+    setDirBusy(true);
+    setDirMsg("");
+    setDirErr("");
+    try {
+      const r = await cacheSetDir(to ?? "", migrateDir);
+      if (r.noop) {
+        setDirMsg("目标目录与当前缓存目录相同，无需变更");
+      } else if (!to) {
+        setDirMsg("已恢复默认缓存目录");
+      } else {
+        setDirMsg(
+          migrateDir
+            ? `已切换缓存目录，迁移 ${r.moved} 个条目${r.failed > 0 ? `（${r.failed} 个未成功——缺失条目将在查看时自动重建）` : ""}`
+            : "已切换缓存目录（未迁移旧条目，旧目录内容保留在设置所示的原路径）"
+        );
+      }
+      const [info2, stats] = await Promise.all([
+        cacheDirInfo(),
+        invoke<{ files: number; bytes: number; limitBytes: number }>("cache_stats"),
+      ]);
+      setDirInfo(info2);
+      setCacheStats(stats);
+      setCfg({ ...cfg, cache: { ...cfg.cache, dir: info2.isDefault ? null : info2.dir } });
+    } catch (ex) {
+      setDirErr(String(ex));
+    } finally {
+      setDirBusy(false);
+    }
+  }
+
+  const commitPlayer = () => {
+    const v = playerDraft.trim();
+    if (v !== (cfg.ui.videoPlayerCmd ?? "")) uiSet({ videoPlayerCmd: v });
+  };
+
+  async function runPlayerTest() {
+    setTestMsg("");
+    setTestErr("");
+    try {
+      const opened = await testPlayerCommand(playerDraft.trim());
+      setTestMsg(`已启动外部播放器，探测文件：${opened}`);
+    } catch (ex) {
+      setTestErr(String(ex));
+    }
+  }
+
+  // 0.3.3 需求3：ffmpeg 路径提交（Enter/失焦）与可用性探测
+  const commitFfmpeg = () => {
+    const v = ffmpegDraft.trim();
+    if (v !== (cfg.ui.ffmpegPath ?? "")) uiSet({ ffmpegPath: v });
+  };
+
+  async function runFfmpegProbe() {
+    setFfmMsg("");
+    setFfmErr("");
+    try {
+      const ver = await ffmpegProbe();
+      setFfmMsg(`ffmpeg 可用：${ver}`);
+    } catch (ex) {
+      setFfmErr(String(ex));
+    }
+  }
 
   return (
-    <Modal title="设置" onClose={p.onClose} width={680}>
+    <div className="page">
+      <div className="settings-inner">
+      <div className="page-head">
+        <div>
+          <h2>设置</h2>
+          <p className="dim">本地目录、服务端、外观、传输、AI 能力、账户与版本信息。</p>
+        </div>
+        <div className="settings-ver">
+          <span className="dim">版本</span>
+          <span className="ver">{info.version ? `v${info.version}` : "未知"}</span>
+        </div>
+      </div>
+      {/* 0.3.7 需求6：数据源切换下拉框——本地/服务端一/服务端二统一在这里切换；
+          切换不离开设置页（旧实现：顶部快速切换会把视图弹回文件列表，配置中途
+          被打断；本页切换保持停留，未登录的服务端切过去即游客只读，登录走
+          「服务端」页签的登录按钮或弹出的登录框）。 */}
+      <div className="source-switch">
+        <label className="dim" htmlFor="source-select">当前数据源</label>
+        <select id="source-select" value={sourceVal} disabled={switching} onChange={(e) => void switchSource(e.target.value)}>
+          {cfg.localRoots.map((r) => (
+            <option key={`l:${r.id}`} value={`local:${r.id}`}>
+              本地 · {r.name}
+            </option>
+          ))}
+          {cfg.servers.map((s, i) => (
+            <option key={`s:${s.id}`} value={`server:${s.id}`}>
+              服务端{i + 1} · {s.name || "(未命名)"}{s.token ? "（已登录）" : "（游客）"}
+            </option>
+          ))}
+          {!(
+            (cur.kind === "local" && cfg.localRoots.some((r) => r.id === cur.rootId)) ||
+            (cur.kind === "server" && cfg.servers.some((s) => s.id === cur.serverId))
+          ) && <option value={sourceVal || ""}>（未选定或来源已删除）</option>}
+          {cfg.localRoots.length === 0 && cfg.servers.length === 0 && <option value="">（尚未配置任何数据源）</option>}
+        </select>
+        {switching && <span className="dim">切换中…</span>}
+        <span className="dim tip">切换即时生效；停留本页可继续配置，看完文件列表再点侧栏「文件」即可。</span>
+      </div>
       <div className="tabs">
         {(
           [
@@ -127,6 +339,7 @@ export default function Settings(p: Props) {
             ["transfer", "传输"],
             ["ai", "AI 能力"],
             ["account", "账户"],
+            ["about", "关于"],
           ] as [Tab, string][]
         ).map(([k, label]) => (
           <button key={k} className={tab === k ? "tab active" : "tab"} onClick={() => setTab(k)}>
@@ -228,6 +441,22 @@ export default function Settings(p: Props) {
               </label>
             </div>
           </div>
+          {/* 0.3.0 需求2：托盘常住 + 关闭按钮行为（默认托盘） */}
+          <div className="field">
+            <label>关闭按钮（X）行为</label>
+            <select
+              value={cfg.ui.closeAction}
+              onChange={(e) => uiSet({ closeAction: e.target.value as "tray" | "quit" })}
+            >
+              <option value="tray">最小化到托盘（默认）</option>
+              <option value="quit">退出程序</option>
+            </select>
+            <p className="dim tip">
+              常驻托盘：点 X 隐藏窗口到系统托盘，经托盘图标左键/双击（Windows）或托盘菜单「显示主窗口」恢复；
+              重复启动应用只会唤起已打开的窗口（不产生第二个实例）；无 AppIndicator 宿主等托盘不可用的环境
+              自动退回「退出程序」，不会把窗口藏丢。
+            </p>
+          </div>
           <label className="check-item">
             <input
               type="checkbox"
@@ -258,9 +487,119 @@ export default function Settings(p: Props) {
               checked={cfg.ui.restoreSessions !== false}
               onChange={(e) => uiSet({ restoreSessions: e.target.checked })}
             />
-            启动时恢复各服务端登录状态（0.6.0 需求9：上次保持登录的重开后仍是登录态；
+            启动时恢复各服务端登录状态（需求9：上次保持登录的重开后仍是登录态；
             关闭则每次启动全部退出——已记住的密码保留，退出状态的服务端可一键快速重登）
           </label>
+          {/* 0.3.0 需求1 / 0.3.3 需求3 / 0.3.7 需求3 / 0.3.8 需求2：H.264/H.265
+              播放四档——系统解码器（默认）/ ffmpeg 转码 /
+              ffmpeg 解码+原生渲染（批量连续解码不落盘）/ 外部播放器 */}
+          <div className="field">
+            <label>视频播放（H.264 / H.265）</label>
+            <div className="radio-row">
+              <label className="radio-item">
+                <input
+                  type="radio"
+                  checked={cfg.ui.videoDecoder === "system"}
+                  onChange={() => uiSet({ videoDecoder: "system" })}
+                />
+                系统解码器（默认，窗口内播放）
+              </label>
+              <label className="radio-item">
+                <input
+                  type="radio"
+                  checked={cfg.ui.videoDecoder === "ffmpeg"}
+                  onChange={() => uiSet({ videoDecoder: "ffmpeg" })}
+                />
+                ffmpeg 转码（窗口内播放）
+              </label>
+              <label className="radio-item">
+                <input
+                  type="radio"
+                  checked={cfg.ui.videoDecoder === "render"}
+                  onChange={() => uiSet({ videoDecoder: "render" })}
+                />
+                ffmpeg 解码+原生渲染（窗口内批量解码）
+              </label>
+              <label className="radio-item">
+                <input
+                  type="radio"
+                  checked={cfg.ui.videoDecoder === "external"}
+                  onChange={() => uiSet({ videoDecoder: "external" })}
+                />
+                外部播放器
+              </label>
+            </div>
+            <p className="dim tip">
+              0.3.6 起四档共用真实编码探测（`ffmpeg -i` 窥首轨编码，毫秒级）：检测到 H.265/HEVC 时——
+              配置了可用 ffmpeg（本设置「ffmpeg 路径」或 PATH）就<b>自动转码后窗口内播放</b>（0.3.7 起转码
+              带<b>实时进度与取消</b>，关闭查看即中断转码、不再残留半成品），不再先撞一次必然失败的系统
+              解码；未配置 ffmpeg 则维持系统解码尝试，失败面板给「用 ffmpeg 转码播放 / 用外部播放器打开」
+              一键兜底。
+              系统解码器 = 操作系统自带的视频组件（Windows：WebView2/Media Foundation；Linux：GStreamer；
+              H.265 需「HEVC 视频扩展」/gstreamer HEVC 插件才可能直接播出）。
+              ffmpeg 转码档 = 凡无法直接解码的视频一律先转 H.264 MP4 再窗口内播放（产物入媒体缓存、
+              同一文件只转一次之后秒开，首次大文件耗 CPU）。
+              <b>ffmpeg 解码+原生渲染档（0.3.7 新增；0.3.8 提速）</b> = 不生成整段转码产物：
+              <b>批量连续解码</b>上屏（一次进程顺序解出约 1.5 秒帧序列、按源帧率节拍播放——
+              取代 0.3.7 逐帧起进程的 2–4 fps；1080p 软解通常可达 25–30 fps，CPU 慢时自动丢帧
+              追赶不积压；音轨单独提取用于对时，无音轨自动静音；不含字幕轨），
+              适合"立刻要看、不想等整段转码"的场景；与转码档共用上方 ffmpeg 路径。
+            </p>
+            {cfg.ui.videoDecoder === "external" && (
+              <>
+                <div className="field">
+                  <label>播放器命令（留空 = 系统关联的播放器）</label>
+                  <input
+                    placeholder={'mpv ／ vlc ／ "C:\\Program Files\\mpv\\mpv.exe" {file}'}
+                    value={playerDraft}
+                    onChange={(e) => setPlayerDraft(e.target.value)}
+                    onBlur={commitPlayer}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitPlayer();
+                    }}
+                  />
+                </div>
+                <button className="btn small" disabled={!playerDraft.trim()} onClick={() => void runPlayerTest()}>
+                  测试外部播放器
+                </button>
+                {testMsg && <p className="dim tip">{testMsg}</p>}
+                {testErr && <div className="error-bar">{testErr}</div>}
+                <p className="dim tip">
+                  命令直接启动（不经 shell，故不支持 &amp;&amp;/管道）；程序路径含空格请整体加引号；
+                  {'{file}'} 代表视频文件路径，未写则作为末位参数自动追加。测试会打开媒体缓存中最近的视频文件，
+                  缓存为空时改用 0 字节探测文件——播放器报"无法解码"属正常，仅验证命令与参数链路。
+                </p>
+              </>
+            )}
+            {/* 0.3.3 需求3：ffmpeg 可执行路径（不内嵌 ffmpeg）；选"ffmpeg 转码"档时
+                用于播放，选"系统解码器"档时作为解码失败面板的转码兜底——两档共用本路径 */}
+            <div className="field">
+              <label>ffmpeg 路径（留空 = 自动在 PATH 中查找 ffmpeg）</label>
+              <input
+                placeholder={'留空走 PATH ／ /usr/bin/ffmpeg ／ "C:\\ffmpeg\\bin\\ffmpeg.exe"'}
+                value={ffmpegDraft}
+                onChange={(e) => setFfmpegDraft(e.target.value)}
+                onBlur={commitFfmpeg}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitFfmpeg();
+                }}
+              />
+              <div className="toolbar-inline">
+                <button className="btn small" onClick={() => void runFfmpegProbe()}>
+                  探测 ffmpeg
+                </button>
+              </div>
+              {ffmMsg && <p className="dim tip">{ffmMsg}</p>}
+              {ffmErr && <div className="error-bar">{ffmErr}</div>}
+              <p className="dim tip">
+                「ffmpeg 转码」档：窗口播不了的视频（如缺系统 HEVC 组件的 H.265）先用本机 ffmpeg 转成
+                H.264 MP4 再播放——转码产物落媒体缓存（同预览缓存受磁盘上限与 LRU 管理），
+                同一文件只转一次、之后直接复用；首次转码耗时随视频长度增大。「系统解码器」档下
+                若窗口解码失败，查看/预览的失败面板也提供「用 ffmpeg 转码播放」一键兜底。
+                本程序不内置 ffmpeg，需自备并在上方配置路径。
+              </p>
+            </div>
+          </div>
         </div>
       )}
 
@@ -296,6 +635,104 @@ export default function Settings(p: Props) {
               onChange={(e) => setCfg({ ...cfg, trashRetentionDays: Math.max(1, Number(e.target.value) || 30) })}
             />
           </div>
+
+          {/* 0.3.2 媒体/缩略图缓存（需求3/4/5）：磁盘 LRU 上限 + 内存预算 + 用量/清空 */}
+          <h3 className="form-section">媒体/缩略图缓存</h3>
+          <div className="field">
+            <label>磁盘缓存上限（MB，默认 10240 = 10GB）</label>
+            <input
+              type="number"
+              min={256}
+              value={cfg.cache.maxDiskMb}
+              onChange={(e) => cacheSet({ maxDiskMb: Math.max(256, Number(e.target.value) || 10240) })}
+            />
+          </div>
+          <div className="field">
+            <label>缩略图内存缓存上限（MB，默认 2048 = 2GB）</label>
+            <input
+              type="number"
+              min={64}
+              value={cfg.cache.maxMemMb}
+              onChange={(e) => cacheSet({ maxMemMb: Math.max(64, Number(e.target.value) || 2048) })}
+            />
+          </div>
+
+          {/* 0.3.8 需求5：缓存目录——显示/切换（可携迁移）/恢复默认 */}
+          <div className="field">
+            <label>缓存目录（媒体/缩略图落盘位置）</label>
+            <div className="row-actions" style={{ alignItems: "center", flexWrap: "wrap" }}>
+              <code className="dim" style={{ maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={dirInfo?.dir}>
+                {dirInfo?.dir ?? "读取中…"}
+                {dirInfo && !dirInfo.isDefault ? "（自定义）" : "（默认）"}
+              </code>
+              <button
+                className="btn small"
+                disabled={dirBusy}
+                title="选择新的缓存目录（可迁移既有缓存）"
+                onClick={() => {
+                  void (async () => {
+                    const picked = await open({ directory: true, title: "选择媒体/缩略图缓存目录" });
+                    if (typeof picked === "string" && picked.trim()) void switchCacheDir(picked.trim());
+                  })();
+                }}
+              >
+                切换目录…
+              </button>
+              {dirInfo && !dirInfo.isDefault && (
+                <button className="btn small" disabled={dirBusy} onClick={() => void switchCacheDir(null)} title={`恢复为 ${dirInfo.defaultDir}`}>
+                  恢复默认目录
+                </button>
+              )}
+              <label className="dim" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <input type="checkbox" checked={migrateDir} onChange={(e) => setMigrateDir(e.target.checked)} />
+                迁移既有缓存到新目录
+              </label>
+            </div>
+          </div>
+          {dirMsg && <p className="dim tip">{dirMsg}</p>}
+          {dirErr && <p className="error-bar">{dirErr}</p>}
+
+          <p className="dim tip">
+            缓存内容：网格缩略图、图片/视频预览与查看落盘（跨程序退出保留，超限按最久未访问自动淘汰；
+            本地模式的链接条目不会移动/删除你的源文件——迁移只搬运缓存自有条目）。
+            {cacheStats && (
+              <>
+                {" "}
+                当前用量 <b>{fmtSize(cacheStats.bytes)}</b>（{cacheStats.files} 个条目），
+                上限 {fmtSize(cacheStats.limitBytes)}。
+              </>
+            )}
+          </p>
+          <div className="toolbar-inline">
+            <button
+              className="btn"
+              onClick={() =>
+                void invoke<{ files: number; bytes: number; limitBytes: number }>("cache_stats")
+                  .then(setCacheStats)
+                  .catch(() => setCacheStats(null))
+              }
+            >
+              刷新用量
+            </button>
+            <button
+              className="btn danger"
+              disabled={clearing}
+              onClick={() => {
+                setClearing(true);
+                void invoke("cache_clear")
+                  .then(() => {
+                    clearThumbCache();
+                    return invoke<{ files: number; bytes: number; limitBytes: number }>("cache_stats");
+                  })
+                  .then(setCacheStats)
+                  .catch(() => {})
+                  .finally(() => setClearing(false));
+              }}
+            >
+              清空缓存
+            </button>
+          </div>
+
           <button className="btn primary" onClick={() => persist(cfg)} disabled={saving}>
             保存传输设置
           </button>
@@ -347,6 +784,8 @@ export default function Settings(p: Props) {
       )}
 
       {tab === "account" && <AccountTab cfg={cfg} onLogin={p.onLogin} />}
+      {tab === "about" && <AboutTab info={info} />}
+      </div>
 
       {httpWarn && (
         <Confirm
@@ -372,7 +811,7 @@ export default function Settings(p: Props) {
             />
           </div>
           <div className="field">
-            <label>服务地址（推荐 https://…；http:// 仅限可信局域网，保存时需确认）</label>
+            <label>服务地址（推荐 https://…；省略协议头按 http:// 处理，仅限可信局域网，保存时需确认）</label>
             <input
               value={srvForm.conf.baseUrl}
               placeholder="https://192.168.1.10:8484"
@@ -423,24 +862,18 @@ export default function Settings(p: Props) {
           </div>
         </Modal>
       )}
-    </Modal>
+    </div>
   );
 }
 
-// ---------- 账户页（0.5.0）：当前来源身份管理 ----------
-// 未登录 → 点击登录；已登录 → 显示身份与可访问目录，可切换账户（登出并换身份重登）/退出登录。
-
-interface MeInfo {
-  id: number;
-  username: string;
-  role: string;
-  createdAt?: string;
-}
+// ---------- 账户页：当前来源登录态管理 ----------
+// 未登录 → 点击登录；已登录 → 显示账户名与可访问目录，可切换账户（登出并换身份
+// 重登）/退出登录。**0.3.6 认证契约：客户端只持 token、不查询自身身份/角色**——
+// 账户名取本地配置（登录时 Rust 权威落存），服务端 /auth/me 亦不再回 role/id。
 
 function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
   const a = active();
   const srv = a.kind === "server" ? p.cfg.servers.find((s) => s.id === a.serverId) : undefined;
-  const [me, setMe] = useState<MeInfo | null>(null);
   const [roots, setRoots] = useState<ServerRoot[]>([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -453,14 +886,11 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
   const [pwErr, setPwErr] = useState("");
 
   useEffect(() => {
-    setMe(null);
     setRoots([]);
     setErr("");
     if (!srv?.token) return;
     let cancelled = false;
-    serverCall("GET", "/api/v1/auth/me")
-      .then((r) => { if (!cancelled) setMe(r as MeInfo); })
-      .catch((e) => { if (!cancelled) setErr(String(e)); });
+    // 不查 /auth/me（客户端无身份查询）；roots 是业务数据（可访问目录清单）
     fetchRoots(srv.id)
       .then((rs) => { if (!cancelled) setRoots(rs ?? []); })
       .catch(() => undefined);
@@ -475,7 +905,6 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
     setBusy(true);
     try {
       await serverLogout(srv.id);
-      setMe(null);
       setRoots([]);
       if (relogin) p.onLogin(srv.id); // 切换账户：登出后立即弹登录框换身份
     } catch (e) {
@@ -501,7 +930,6 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
         : "密码已修改，请使用新密码重新登录。");
       setPwOld("");
       setPwNew("");
-      setMe(null);
       setRoots([]);
     } catch (e) {
       setPwErr(String(e).replace(/^AUTH_REQUIRED:\s*/, ""));
@@ -529,9 +957,9 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
         <div>
           <div className="list-name">{srv.name || "(未命名)"}　<span className="dim path-cell">{srv.baseUrl}</span></div>
           <div className="dim">
-            {me
-              ? `已登录为：${me.username}（${me.role === "admin" ? "管理员" : "普通用户"}）`
-              : srv.token ? "会话恢复中…" : "未登录（游客：可浏览公开内容，登录后可下载/上传/修改）"}
+            {srv.token
+              ? `已登录为：${srv.username ?? "—"}`
+              : "未登录（游客：可浏览公开内容，登录后可下载/上传/修改）"}
           </div>
         </div>
         {!srv.token && (
@@ -554,7 +982,7 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
             ))}
         </div>
       )}
-      {me && (
+      {srv.token && (
         <>
           <div className="field">
             <label>该身份可访问的目录（由服务端管理员分配）</label>
@@ -597,6 +1025,37 @@ function AccountTab(p: { cfg: AppConfig; onLogin(serverId: string): void }) {
       <p className="dim tip">
         账户会话最长保留 3 周（活跃自动续期）。用户创建、目录分配与权限管理均在服务端独立端口的
         管理台完成，客户端不提供用户管理服务。
+      </p>
+    </div>
+  );
+}
+
+// ---------- 关于（0.1.5）：版本信息 ----------
+// 客户端版本/Tauri 版本取自运行时 app 命令（与安装包注入版本一致，非编译期常量）；
+// 配套服务端版本为兼容矩阵事实，随 CHANGELOG 一起维护，改矩阵时同步这里的文案。
+function AboutTab(p: { info: AppInfo }) {
+  const ver = p.info.version ? `v${p.info.version}` : "未知";
+  return (
+    <div className="tab-body">
+      <div className="about-hero">
+        <div className="about-name">{p.info.name}</div>
+        <div className="about-ver">{ver}</div>
+        <div className="dim">Tauri 2 桌面客户端 · 本地目录 / 服务端双数据源</div>
+      </div>
+      <div className="list-row">
+        <span className="dim">客户端版本</span>
+        <span className="about-val">{ver}</span>
+      </div>
+      <div className="list-row">
+        <span className="dim">Tauri 框架版本</span>
+        <span className="about-val">{p.info.tauri ? `v${p.info.tauri}` : "未知"}</span>
+      </div>
+      <div className="list-row">
+        <span className="dim">配套服务端</span>
+        <span className="about-val">0.2.x（推荐，当前 0.2.4）· 0.1.x 可用</span>
+      </div>
+      <p className="dim tip">
+        版本号读自安装包自身元数据：构建脚本以 -V 指定产物版本时，这里显示的就是该注入值（不改动工程版本源文件）。
       </p>
     </div>
   );

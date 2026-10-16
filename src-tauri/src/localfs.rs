@@ -52,21 +52,46 @@ pub(crate) fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String>
         }
     }
     // 双保险：确保结果仍在根目录内
-    let root_c = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root_c = canonical_base(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
     let mut clean = PathBuf::new();
     for c in p.components() {
         match c {
             Component::ParentDir => {
                 clean.pop();
             }
-            Component::Normal(s) => clean.push(s),
-            other => clean = other.as_os_str().into(),
+            // Windows 盘符前缀（C:）与根分隔符（\）必须直接拼接：
+            // 整体赋值会丢盘符，push 又会把 "\" 当绝对路径清空已有内容
+            Component::Prefix(_) | Component::RootDir => {
+                let mut raw = clean.as_os_str().to_os_string();
+                raw.push(c.as_os_str());
+                clean = PathBuf::from(raw);
+            }
+            other => clean.push(other.as_os_str()),
         }
     }
     if !clean.starts_with(&root_c) && !clean.starts_with(root) {
         return Err("路径不允许越出所管理的目录".into());
     }
     Ok(p)
+}
+
+/// Windows 上 canonicalize 返回 \\?\ 前缀的 verbatim 路径，与配置中的普通
+/// 盘符路径做 starts_with 比对前须归一（非 Windows 为恒等变换）。
+#[cfg(windows)]
+fn canonical_base(p: PathBuf) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy().into_owned();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p
+    }
+}
+
+#[cfg(not(windows))]
+fn canonical_base(p: PathBuf) -> PathBuf {
+    p
 }
 
 pub(crate) fn kind_of(name: &str, is_dir: bool) -> String {
@@ -76,7 +101,10 @@ pub(crate) fn kind_of(name: &str, is_dir: bool) -> String {
     let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "heic" | "tiff" => "image",
-        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" => "video",
+        // 0.3.0 需求1：H.264/H.265 常见容器/裸流并入 video（不含 ts——撞 TypeScript；
+        // 与前端 preview.ts VIDEO_EXT / player.rs VIDEO_EXT 同集合）
+        "mp4" | "m4v" | "mkv" | "mov" | "webm" | "avi" | "flv" | "wmv" | "ogv" | "ogm" | "m2ts"
+        | "mts" | "mpg" | "mpeg" | "mpe" | "3gp" | "vob" | "hevc" | "h265" | "h264" => "video",
         "mp3" | "wav" | "flac" | "m4a" | "aac" | "ogg" | "opus" => "audio",
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf" | "epub" => "document",
         "zip" | "tar" | "gz" | "bz2" | "7z" | "rar" | "xz" => "archive",
@@ -133,6 +161,90 @@ pub async fn fs_list(app: AppHandle, root_id: String, path: String) -> Result<Ve
             .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(out)
+}
+
+/// 需求41 目录上传：递归枚举本地目录树（一次性返回，带硬上限）。
+/// relPath 相对被遍历目录、一律正斜杠拼接（Windows 安全）；符号链接（文件与目录）
+/// 不跟随、不上传（防逃逸根/软链成环）；`.fmtrash`（服务端保留名）跳过；
+/// 深度/条目数超限置 truncated=true——前端据此整体拒绝，绝不上传半棵树。
+/// 中途读目录失败 = 整个遍历报错（确定性失败优于静默缺内容；非 UTF8 文件名走
+/// to_string_lossy，与 fs_list 既有口径一致）。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkEntry {
+    pub name: String,
+    pub rel_path: String,
+    pub is_dir: bool,
+    pub size: u64, // 目录为 0
+    /// 0.3.7 需求2：修改时间（毫秒；读不到=0）——入上传账本作"中断后本地文件
+    /// 是否变过"的判据（变过则旧会话分片不可信，恢复时作废重传）。
+    pub mtime_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkResult {
+    pub entries: Vec<WalkEntry>, // 不含被遍历目录自身
+    pub truncated: bool,
+}
+
+const WALK_MAX_ENTRIES: usize = 20_000;
+const WALK_MAX_DEPTH: usize = 64;
+
+#[tauri::command]
+pub async fn fs_walk(app: AppHandle, root_id: String, path: String) -> Result<WalkResult, String> {
+    let st = state(&app);
+    let root = st.root_path(&root_id)?;
+    let abs = resolve_in_root(&root, &path)?;
+    if !abs.is_dir() {
+        return Err(format!("{path} 不是目录"));
+    }
+    let mut out: Vec<WalkEntry> = Vec::new();
+    let mut truncated = false;
+    // 显式栈迭代（不递归——深树无爆栈风险；rel 只由字符串段拼出，不经过 PathBuf 分隔符）
+    let mut stack: Vec<(PathBuf, String, usize)> = vec![(abs, String::new(), 0)];
+    while let Some((dir, prefix, depth)) = stack.pop() {
+        if depth >= WALK_MAX_DEPTH {
+            truncated = true;
+            continue;
+        }
+        let rd = fs::read_dir(&dir).map_err(|e| format!("无法读取目录 {}: {e}", if prefix.is_empty() { path.as_str() } else { &prefix }))?;
+        for de in rd.flatten() {
+            if out.len() >= WALK_MAX_ENTRIES {
+                truncated = true;
+                continue;
+            }
+            let name = de.file_name().to_string_lossy().into_owned();
+            if name == ".fmtrash" {
+                continue;
+            }
+            let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            let ft = match de.file_type() {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                out.push(WalkEntry { name, rel_path: rel.clone(), is_dir: true, size: 0, mtime_ms: 0 });
+                stack.push((de.path(), rel, depth + 1));
+            } else {
+                let meta = de.metadata();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let mtime_ms = meta
+                    .and_then(|m| m.modified())
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                out.push(WalkEntry { name, rel_path: rel, is_dir: false, size, mtime_ms });
+            }
+        }
+    }
+    Ok(WalkResult { entries: out, truncated })
 }
 
 #[tauri::command]
@@ -479,7 +591,7 @@ pub async fn fs_preview(app: AppHandle, root_id: String, path: String) -> Result
     ))
 }
 
-/// 本地回收站过期自动清理（0.4.0；启动时执行，需求：默认保留 30 天，独立于服务端策略）。
+/// 本地回收站过期自动清理（启动时执行，需求：默认保留 30 天，独立于服务端策略）。
 /// 过期条目连同暂存实体一并彻底删除；保留天数取 AppConfig.trashRetentionDays（<=0 视为 30）。
 pub fn purge_expired_trash(st: &AppState) {
     let days = st.config().trash_retention_days.max(1);
@@ -692,24 +804,211 @@ fn cache_hash(s: &str) -> u64 {
     h.finish()
 }
 
-/// 把本地根内文件硬链接（或复制）到媒体缓存目录，返回缓存绝对路径。
+/// 媒体缓存键（0.1.7 起含 ver 版本串）；fs_media_cache 与 fs_thumb 共用，
+/// 保证缩略图条目 `<key_hash>.thumb.jpg` 与媒体条目 `<key_hash>.<ext>` 同源。
+fn cache_key(root_id: &str, path: &str, ver: Option<&str>) -> String {
+    match ver {
+        Some(v) => format!("{root_id}/{path}@{v}"),
+        None => format!("{root_id}/{path}"),
+    }
+}
+
+fn ext_of(path: &str) -> String {
+    path.rsplit('.').next().unwrap_or("").to_lowercase()
+}
+
+/// 把本地根内文件确保纳入媒体缓存目录，返回缓存绝对路径。
 /// asset 协议仅授权缓存目录，避免放开任意路径。
-#[tauri::command]
-pub async fn fs_media_cache(app: AppHandle, root_id: String, path: String) -> Result<String, String> {
-    let st = state(&app);
-    let root = st.root_path(&root_id)?;
-    let abs = resolve_in_root(&root, &path)?;
+/// 0.1.7：可选 ver 并入缓存键——覆盖写后旧键自然失效重拉（data URL 时代无此问题）。
+/// 0.2.1：相机 RAW（NEF/CR2/…）浏览器无法解码——缓存的不再是原始字节，而是
+/// 从文件内提取的**最大内嵌 JPEG 预览**（存为 .jpg）；无完整内嵌 JPEG 则报错，
+/// 前端回退图标。双击查看/眼睛预览/网格缩略图因此全链路支持 RAW，服务端零改动。
+pub(crate) fn media_cache_path(
+    st: &AppState,
+    root_id: &str,
+    path: &str,
+    ver: Option<&str>,
+) -> Result<PathBuf, String> {
+    let root = st.root_path(root_id)?;
+    let abs = resolve_in_root(&root, path)?;
     if !abs.is_file() {
         return Err("不是文件".into());
     }
-    let ext = path.rsplit('.').next().unwrap_or("bin");
-    let name = format!("{:x}.{}", cache_hash(&format!("{root_id}/{path}")), ext);
+    let ext = ext_of(path);
+    let raw = crate::thumb::is_raw_ext(&ext);
+    let key = cache_key(root_id, path, ver);
+    let name = format!("{:x}.{}", cache_hash(&key), if raw { "jpg" } else { ext.as_str() });
     let dest = st.media_cache_dir().join(&name);
-    if !dest.exists() {
-        let linked = fs::hard_link(&abs, &dest);
-        if linked.is_err() {
-            fs::copy(&abs, &dest).map_err(|e| e.to_string())?;
+    if dest.exists() {
+        // 本地模式条目可能是 hard_link（与用户源文件同 inode）——绝不 touch
+        // 其 mtime（会污染源文件；淘汰按创建序，unlink 只断链接不伤源数据）。
+        return Ok(dest);
+    }
+    if raw {
+        let md = fs::metadata(&abs).map_err(|e| e.to_string())?;
+        if md.len() > 512 << 20 {
+            return Err("RAW 文件过大（>512MiB），不提取内嵌预览".into());
+        }
+        let data = fs::read(&abs).map_err(|e| e.to_string())?;
+        let jpeg = crate::thumb::extract_preview(&data)
+            .ok_or("该 RAW 未找到完整内嵌 JPEG 预览，请下载后用 RAW 软件查看")?;
+        fs::write(&dest, &jpeg).map_err(|e| e.to_string())?;
+        crate::cachemgr::note_new_file(jpeg.len() as u64);
+        crate::cachemgr::maybe_enforce(st);
+        return Ok(dest);
+    }
+    let linked = fs::hard_link(&abs, &dest);
+    if linked.is_err() {
+        fs::copy(&abs, &dest).map_err(|e| e.to_string())?;
+    }
+    if let Ok(m) = fs::metadata(&dest) {
+        crate::cachemgr::note_new_file(m.len());
+    }
+    crate::cachemgr::maybe_enforce(st);
+    Ok(dest)
+}
+
+/// 批量计算本地文件 SHA-256（0.3.2 目录重传校验 pass2）：流式 64KiB，
+/// 与服务端 fileops.SHA256File 同算法同小写 hex，可直接与服务端存哈希互比。
+/// 逐条目容错：单文件读失败返回 null（调用方按 unknown 处理），绝不整批失败。
+#[tauri::command]
+pub async fn fs_file_hashes(
+    app: AppHandle,
+    root_id: String,
+    rels: Vec<String>,
+) -> Result<Vec<Option<String>>, String> {
+    use sha2::{Digest, Sha256};
+    let st = state(&app);
+    let root = st.root_path(&root_id)?;
+    let mut out = Vec::with_capacity(rels.len());
+    for rel in rels {
+        let abs = match resolve_in_root(&root, &rel) {
+            Ok(a) => a,
+            Err(_) => {
+                out.push(None);
+                continue;
+            }
+        };
+        let h = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut f = match fs::File::open(&abs) {
+                Ok(f) => f,
+                Err(_) => return None,
+            };
+            if !f.metadata().map(|m| m.is_file()).unwrap_or(false) {
+                return None;
+            }
+            let mut hasher = Sha256::new();
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match f.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => hasher.update(&buf[..n]),
+                    Err(_) => return None,
+                }
+            }
+            Some(hex_encode(&hasher.finalize()))
+        })
+        .await;
+        out.push(h.unwrap_or(None));
+    }
+    Ok(out)
+}
+
+/// 绝对路径单文件 SHA-256（0.3.7 需求2 恢复对账辅助）：与 fs_file_hashes 同
+/// 流式算法；读失败/非常规文件返回 None。仅供服务端上传冲突后的"远端已相同"
+/// 判据使用——路径来自本机上传账本，非用户任意输入面。
+pub async fn sha256_abs(path: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let p = path.to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut f = fs::File::open(&p).ok()?;
+        if !f.metadata().ok()?.is_file() {
+            return None;
+        }
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buf[..n]),
+                Err(_) => return None,
+            }
+        }
+        Some(hex_encode(&hasher.finalize()))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// 批量本地文件修改时间（0.3.7 需求2）：账本恢复时的"本地是否变过"判据
+/// （路径同样来自本机账本；stat 只读元数据，读不到=None→调用方按未知保守处理）。
+#[tauri::command]
+pub async fn fs_mtimes(app: AppHandle, paths: Vec<String>) -> Result<Vec<Option<i64>>, String> {
+    let _ = app;
+    Ok(paths
+        .iter()
+        .map(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.is_file())
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0)
+                })
+        })
+        .collect())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+#[tauri::command]
+pub async fn fs_media_cache(
+    app: AppHandle,
+    root_id: String,
+    path: String,
+    ver: Option<String>,
+) -> Result<String, String> {
+    let st = state(&app);
+    let p = media_cache_path(&st, &root_id, &path, ver.as_deref())?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
+/// 网格视图缩略图（0.2.1；0.3.3 契约对齐 srv_thumb）：确保媒体缓存条目后，在
+/// 缓存目录生成/复用 ≤512px JPEG（`<key_hash>.thumb.jpg`），前端经
+/// media_read_bytes 建 blob 上屏。
+///  - `Ok(Some(path))` = 缩略图（或 ≤8MiB 原路径交浏览器自绘，svg/ico/heic 等）；
+///  - `Ok(None)` = **永久无图**（解不了且 >8MiB）——直接落图标，不再按瞬时错误
+///    空转重试 3 轮（0.3.2 契约瑕疵：本地解码失败本是确定性结局）；
+///  - `Err` = 瞬时失败（缓存条目建立失败等），前端退避重试。
+#[tauri::command]
+pub async fn fs_thumb(
+    app: AppHandle,
+    root_id: String,
+    path: String,
+    ver: Option<String>,
+) -> Result<Option<String>, String> {
+    let st = state(&app);
+    let src = media_cache_path(&st, &root_id, &path, ver.as_deref())?;
+    let key = cache_key(&root_id, &path, ver.as_deref());
+    match crate::thumb::ensure_thumb(&st, &key, &src) {
+        Ok(t) => Ok(Some(t.to_string_lossy().into_owned())),
+        Err(_) => {
+            if fs::metadata(&src).map(|m| m.len() <= 8 << 20).unwrap_or(false) {
+                Ok(Some(src.to_string_lossy().into_owned()))
+            } else {
+                Ok(None)
+            }
         }
     }
-    Ok(dest.to_string_lossy().into_owned())
 }

@@ -1,5 +1,6 @@
 // App 根组件：全局状态编排（来源切换/刷新/对话框调度/传输/位置恢复/主题/登录态事件同步）。
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import "./styles/base.css";
@@ -8,9 +9,12 @@ import type { ActiveConf, AppConfig, FsEntry, SearchHit, ServerRoot, TrashItem }
 import { uid } from "./lib/types";
 import * as api from "./lib/api";
 import { AuthError } from "./lib/api";
-import { initTransfers, enqueue, subscribe } from "./lib/transfer";
+import { initTransfers, enqueue, subscribe, enqueueGroup, type GroupChildSpec } from "./lib/transfer";
+import { walkLocalDir, type WalkResult } from "./lib/local";
+import { isMissingEndpoint, serverCheck, serverMkdirs, type CheckState } from "./lib/server";
 import { applyTheme } from "./lib/theme";
 import { joinPath, parentOf } from "./lib/format";
+import { viewableType } from "./lib/preview";
 import Sidebar, { type View } from "./components/Sidebar";
 import Topbar from "./components/Topbar";
 import FileView from "./components/FileView";
@@ -20,14 +24,15 @@ import AIView from "./components/AIView";
 import SearchView from "./components/SearchView";
 import Settings from "./components/Settings";
 import PreviewModal from "./components/PreviewModal";
+import FileViewer from "./components/FileViewer";
 import ShareDialog from "./components/ShareDialog";
 import AclDialog from "./components/AclDialog";
 import VersionsDialog from "./components/VersionsDialog";
 import TransferPanel from "./components/TransferPanel";
 import ContextMenu, { type CtxItem } from "./components/ContextMenu";
 import UploadToDialog from "./components/UploadToDialog";
-import { IconEye, IconUpload } from "./components/icons";
-import { Confirm, Modal, Prompt } from "./components/Modals";
+import { IconEye, IconUpload, IconExpand } from "./components/icons";
+import { Confirm, Modal, Prompt, UploadDiffDialog } from "./components/Modals";
 
 type Dialog =
   | { kind: "none" }
@@ -35,11 +40,19 @@ type Dialog =
   | { kind: "prompt"; title: string; label: string; initial: string; onOk(v: string): void }
   | { kind: "login"; serverId: string; from?: "settings" }
   | { kind: "uploadTo"; entry: FsEntry }
-  | { kind: "settings"; tab?: "account" }
+  // 0.1.4（需求2）：设置不再是对话框，并入视图体系（view === "settings"，主区整页视图）
   | { kind: "preview"; entry: FsEntry }
   | { kind: "share"; target: { path: string; isDir: boolean } }
   | { kind: "acl"; path: string }
-  | { kind: "versions"; entry: FsEntry };
+  | { kind: "versions"; entry: FsEntry }
+  // 0.3.2 目录重传预检：同名不同内容的文件逐个询问 覆盖/跳过（null=整体取消）
+  | {
+      kind: "uploadDiff";
+      serverName: string;
+      dirName: string;
+      rows: { rel: string; name: string; size: number }[];
+      onDecide(d: Record<string, "ovr" | "skip"> | null): void;
+    };
 
 interface PromptLoginProps {
   serverId: string;
@@ -49,7 +62,7 @@ interface PromptLoginProps {
 }
 
 /**
- * 登录框（0.6.0 需求3）：可按"服务端+账户"维度记住密码（本体存系统凭证库）；
+ * 登录框（需求3）：可按"服务端+账户"维度记住密码（本体存系统凭证库）；
  * 已记住的账户出现在下拉中，选中自动回填密码；取消勾选记住=清除该账户凭证。
  * 需求11/12：管理员身份由服务端在用户端口拒绝登录（403），错误原文显示于此。
  */
@@ -128,7 +141,7 @@ function LoginModal(p: PromptLoginProps) {
         <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
         记住密码（存系统凭证库，按服务端+账户隔离，供下次快速登录）
       </label>
-      <div className="dim tip">登录后会话最长保留 3 周（活跃自动续期）。管理员账户只能在服务端管理台登录。</div>
+      <div className="dim tip">登录后 1 小时内活跃自动续期（凭证不变、无感知）；闲置超过 1 小时或退出客户端需重新登录——已记住密码时重开自动登录。管理员账户只能在服务端管理台登录。</div>
       {err && <div className="error-bar">{err}</div>}
       <div className="modal-actions">
         <button className="btn ghost" onClick={p.onClose}>
@@ -152,17 +165,26 @@ export default function App() {
   const [error, setError] = useState("");
   const [roots, setRoots] = useState<ServerRoot[]>([]);
   const [dialog, setDialog] = useState<Dialog>({ kind: "none" });
+  // 0.1.7：查看覆盖层（双击可预览类型→主区就地显示；非 Dialog，弹窗仍可在其上叠加）
+  const [viewing, setViewing] = useState<FsEntry | null>(null);
   // 本地文件右键菜单（需求7）
   const [ctx, setCtx] = useState<{ entry: FsEntry; x: number; y: number } | null>(null);
   const [toast, setToast] = useState("");
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const [groupByKind, setGroupByKind] = useState(false);
-  // 左侧导航折叠态（0.4.0，总结4：默认折叠为小箭头标签）
+  // 左侧导航折叠态（默认折叠为小箭头标签）
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const restored = useRef(false);
   // 已自动弹过登录框的服务端 id：后台加载遇 401 只对同一服务端弹一次，
   // 用户取消后不再反复弹出（显式操作/登录成功/登出时重置）。
   const loginPrompted = useRef("");
+  // 0.1.4（需求2）：设置为左侧导航保持可见的主区整页视图；侧栏"用户"与登录回跳
+  // 直达账户页签（以 key 侧重挂 Settings 使 initialTab 生效）。
+  const [settingsTab, setSettingsTab] = useState<"account" | null>(null);
+  const openSettings = (tab?: "account") => {
+    setSettingsTab(tab ?? null);
+    setView("settings");
+  };
 
   const notify = useCallback((msg: string) => {
     setToast(msg);
@@ -251,6 +273,30 @@ export default function App() {
     [notify]
   );
 
+  /** 需求41：盯一个目录上传组行到终态——整组结束才一次汇总通知 + 刷新。 */
+  const watchGroup = useCallback(
+    (gid: string, label: string) => {
+      const unsub = subscribe((list) => {
+        const t = list.find((x) => x.id === gid);
+        if (!t) {
+          unsub();
+          return;
+        }
+        if (t.status === "done") {
+          unsub();
+          notify(`目录上传完成：${label}（${t.files}/${t.filesTotal} 个文件）`);
+          void refreshRef.current();
+        } else if (t.status === "error") {
+          unsub();
+          notify(`目录上传结束但有失败：${t.message}（可在传输面板处理）`);
+        } else if (t.status === "cancelled") {
+          unsub();
+        }
+      });
+    },
+    [notify]
+  );
+
   // 启动：加载配置 → 应用主题 → 恢复上次位置（需求21）→ 初始化传输监听
   useEffect(() => {
     initTransfers();
@@ -284,6 +330,13 @@ export default function App() {
   // 需求8/1：Rust 侧登录/登出/令牌轮换/凭证变更广播 fm-config-changed——
   // 前端同步配置单例 + React 状态 + 当前服务端 roots；左侧 badge 与右侧
   // 内容由此共用同一时刻快照（保存链已由 save_config 令牌合并保证不会反向覆盖）。
+  // 0.3.5 需求4：服务端重启→登录态失效→401 清空列表→重新登录。登录成功路径
+  // （onDone 保持同 rootId/同 path）不会翻动列表 effect 的任何依赖 → 必须手动
+  // 按一次刷新才出文件。加一个纯计数 loginEpoch：Rust 侧每次认证态变更广播
+  // fm-config-changed 时 +1，并入下方列表 effect 依赖（稳定原始值，不参与
+  // saveConfig 对象引用环路——约定 4 不违反）。登出/改密同样触发一次列表重取，
+  // 语义良性（refresh 自带 401→handleAuthFail 承接）。
+  const [loginEpoch, setLoginEpoch] = useState(0);
   useEffect(() => {
     let cancelled = false;
     const un = listen("fm-config-changed", async () => {
@@ -296,6 +349,7 @@ export default function App() {
         const rs = await api.fetchRoots(a.serverId).catch(() => [] as ServerRoot[]);
         if (!cancelled) setRoots(rs ?? []);
       }
+      setLoginEpoch((n) => n + 1); // 重新登录成功：强制重拉当前目录列表
     });
     return () => {
       cancelled = true;
@@ -303,15 +357,29 @@ export default function App() {
     };
   }, []);
 
+  // 0.3.7 需求2：账本组恢复续跑（TransfersView [继续] → resumeJournalGroup 入队）
+  // 后补挂终态监听——旧实现 watchGroup 只挂在原始入队路径，恢复的组跑完静默无感。
+  useEffect(() => {
+    const h = (ev: Event) => {
+      const d = (ev as CustomEvent<{ gid?: string; label?: string }>).detail;
+      if (d?.gid) watchGroup(d.gid, d.label || "目录上传");
+    };
+    window.addEventListener("fm-group-resumed", h);
+    return () => window.removeEventListener("fm-group-resumed", h);
+  }, [watchGroup]);
+
   useEffect(() => {
     if (!restored.current) return;
     if (view === "files") refresh();
     if (view === "trash") refreshTrash();
-  }, [view, path, activeSig, refresh, refreshTrash]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, path, activeSig, refresh, refreshTrash, loginEpoch]);
 
   // 记录当前位置（防抖持久化，需求21）
   useEffect(() => {
     if (!cfg || !restored.current) return;
+    // 设置视图不记录位置：lastLocation 保持进入设置前的业务视图，避免下次启动恢复到设置页
+    if (view === "settings") return;
     const t = window.setTimeout(async () => {
       const c = api.getConfig();
       const next: AppConfig = {
@@ -328,6 +396,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, path, viewMode, activeSig]);
 
+  // 0.1.7：切换视图/目录/来源时收起查看覆盖层（依赖均为稳定字符串，见上 activeSig 注）
+  useEffect(() => {
+    setViewing(null);
+  }, [view, path, activeSig]);
+
   const setActive = async (a: ActiveConf) => {
     const c = api.getConfig();
     const next = { ...c, active: a };
@@ -339,15 +412,17 @@ export default function App() {
 
   // ---------- 来源切换（需求10：主界面快速切换） ----------
 
-  async function pickLocalRoot(id: string) {
-    setView("files");
+  /** stay=true：切换后保持当前视图不跳回文件页（0.3.7 需求6——设置页内切换
+   *  数据源时用户正停留在本页，切完必须仍在设置页）。 */
+  async function pickLocalRoot(id: string, stay = false) {
+    if (!stay) setView("files");
     await setActive({ kind: "local", rootId: id });
   }
 
   function switchLocal() {
     const c = api.getConfig();
     if (!c.localRoots.length) {
-      setDialog({ kind: "settings" });
+      openSettings();
       return;
     }
     const last =
@@ -358,15 +433,16 @@ export default function App() {
     void pickLocalRoot(last);
   }
 
-  /** 切换服务端：未登录也允许（游客只读浏览，需求6）。 */
-  async function pickServer(id: string) {
+  /** 切换服务端：未登录也允许（游客只读浏览，需求6）。
+   *  stay=true 切换后保持当前视图（0.3.7 需求6：设置页内切换不退出设置）。 */
+  async function pickServer(id: string, stay = false) {
     const c = api.getConfig();
     const s = c.servers.find((x) => x.id === id);
     if (!s) return;
     try {
       const rs = await api.fetchRoots(id);
       setRoots(rs ?? []);
-      setView("files");
+      if (!stay) setView("files");
       const keepRoot = api.active().kind === "server" && api.active().serverId === id ? api.active().rootId : "";
       await setActive({ kind: "server", serverId: id, rootId: keepRoot || rs?.[0]?.id || "" });
       // 需求10：记住"选中的远程"，本地模式下快速切换第二按钮指向它
@@ -396,11 +472,22 @@ export default function App() {
 
   // ---------- 文件操作 ----------
 
+  /** 双击入口（0.1.7 区分查看/预览）：目录→进入；可预览类型→主区"查看"覆盖层
+   * （无大小限制，大图片可看）；其余→预览弹窗（提示下载，同旧行为）。 */
   function openEntry(e: FsEntry) {
     if (e.isDir) {
       setPath(e.path);
       return;
     }
+    if (viewableType(e)) {
+      setViewing(e);
+      return;
+    }
+    previewEntry(e);
+  }
+
+  /** 预览按钮/右键"预览"：缩放式弹窗（"预览是缩略图"语义） */
+  function previewEntry(e: FsEntry) {
     setDialog({ kind: "preview", entry: e });
   }
 
@@ -436,7 +523,7 @@ export default function App() {
   }
 
   /**
-   * 上传/导入（需求3 覆盖冲突保护）。服务端模式 0.6.0 起入队执行：
+   * 上传/导入（需求3 覆盖冲突保护）。服务端模式入队执行：
    * 传输面板可暂停→断点续传、失败重试；覆盖任务的 BaseHash 由任务执行时
    * 重新 stat 取得（并发状态最新）。本地模式保持即时导入。
    */
@@ -588,6 +675,222 @@ export default function App() {
     notify(`已加入上传队列：${entry.name} → ${targets.length} 个服务端（见"传输"界面）`);
   }
 
+  /** 需求41：右键本地目录 → 整树上传。0.3.2 完整时序：fs_walk 枚举 → **预检**
+   *  （/check 两遍：先 size、unknown 集补本地 SHA-256 复查；相同跳过、同名不同
+   *  内容弹窗逐个询问覆盖/跳过）→ mkdirs 批量建目录骨架（含空目录，旧服务端
+   *  自动退化逐个 mkdir）→ 入上传账本 → 逐文件入组队列（并发池限流）。
+   *  配 Server <0.2.1（无 /check）跳过预检走 0.2.0 旧流程（全量重传+冲突语义）。 */
+  async function uploadDirToServers(entry: FsEntry, targets: { serverId: string; rootId: string }[]) {
+    setDialog({ kind: "none" });
+    let walk: WalkResult;
+    try {
+      walk = await walkLocalDir(api.active().rootId, entry.path);
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    if (walk.truncated) {
+      setError("目录过大（超过 20000 个条目或 64 层深度），已拒绝上传，请拆分后分批进行");
+      return;
+    }
+    let dirAbs = "";
+    try {
+      dirAbs = api.joinLocalAbs(entry.path);
+    } catch (e) {
+      notify(String(e));
+      return;
+    }
+    const dirs = [entry.name, ...walk.entries.filter((x) => x.isDir).map((x) => `${entry.name}/${x.relPath}`)];
+    const files = walk.entries.filter((x) => !x.isDir);
+    let enqueued = 0;
+    for (const t of targets) {
+      const srvName = cfg?.servers.find((s) => s.id === t.serverId)?.name ?? t.serverId;
+      let plan: { children: GroupChildSpec[]; skipped: number } | null = null;
+      try {
+        plan = await planDirUpload(t, srvName, entry.path, entry.name, dirAbs, files);
+      } catch (e) {
+        if (isMissingEndpoint(e)) {
+          plan = null; // 旧服务端无 /check：不预检，走 0.2.0 原流程
+        } else if (String(e).includes("DIFF_CANCELLED")) {
+          notify(`已取消：${entry.name} → ${srvName}`);
+          continue;
+        } else {
+          setError(`预检失败（${srvName}）：${String(e)}`);
+          continue; // 权限/jail/暂停等：整服务端跳过（上传也必失败），其余照常
+        }
+      }
+      if (!plan) {
+        plan = {
+          children: files.map((f) => ({
+            name: f.name,
+            remotePath: `${entry.name}/${f.relPath}`,
+            localPath: `${dirAbs}/${f.relPath}`,
+            size: f.size,
+            baseHash: "-",
+            journalRel: f.relPath,
+            mtimeMs: f.mtimeMs,
+          })),
+          skipped: 0,
+        };
+      }
+      try {
+        await serverMkdirs(t.serverId, t.rootId, dirs);
+      } catch (e) {
+        setError(`建远端目录失败：${String(e)}`);
+        continue; // 该服务端整体跳过（文件传上去也会因权限/jail 失败），其余照常
+      }
+      if (files.length === 0 && plan.children.length === 0) {
+        notify(`已在所选服务端创建空目录 ${entry.name}`);
+        continue;
+      }
+      const gid = uid();
+      // 账本先行（组+条目规格；done_files 由 Rust 在分片终态回写）。账本失败
+      // 不阻塞上传——只丢"重启续传"能力。
+      try {
+        await invoke("lg_new_group", {
+          gid,
+          label: `目录 ${entry.name}`,
+          serverId: t.serverId,
+          rootId: t.rootId,
+          localAbs: dirAbs,
+          remotePrefix: entry.name,
+          total: plan.children.length,
+        });
+        await invoke("lg_set_children", {
+          gid,
+          items: plan.children.map((c) => ({
+            relPath: c.journalRel ?? c.name,
+            name: c.name,
+            localPath: c.localPath,
+            remotePath: c.remotePath,
+            size: c.size,
+            // 0.3.7 需求2：内容证据入账本（mtime 恒有；sha 仅 pass2 哈希命中者）——
+            // 恢复对账的"本地是否变过/远端是否已同"判据来源
+            mtimeMs: c.mtimeMs ?? 0,
+            sha: c.sha ?? undefined,
+          })),
+        });
+      } catch {
+        /* 账本不可用（磁盘满等）：降级为进程内任务，行为同 0.3.1 */
+      }
+      if (plan.children.length === 0) {
+        void invoke("lg_group_status", { gid, status: "done" }).catch(() => {});
+        notify(`目录上传：${entry.name} → ${srvName}，${plan.skipped} 个文件远端已相同，无需传输`);
+        void refreshRef.current();
+        continue;
+      }
+      enqueueGroup({
+        id: gid,
+        label: `目录 ${entry.name}`,
+        serverId: t.serverId,
+        rootId: t.rootId,
+        children: plan.children,
+        skipped: plan.skipped,
+      });
+      watchGroup(gid, entry.name);
+      enqueued++;
+    }
+    if (files.length > 0 && enqueued > 0) {
+      notify(`已加入目录上传队列：${entry.name}（${files.length} 个文件，重复部分将自动跳过/询问）→ ${enqueued} 个服务端（见"传输"界面）`);
+    }
+  }
+
+  /** 目录重传预检（0.3.2）：两遍 /check + 差异弹窗；产出实际入队子任务与跳过数。
+   *  0.3.7 需求2：①pass2 哈希的相对路径改为**根相对**（dirRel/relPath——旧实现
+   *  按遍历目录相对解析，全部 miss 成 null，pass2 实际从未生效，unknown 判定
+   *  长期空转）；②子任务随带 mtimeMs/sha 内容证据入账本，恢复对账有判据。 */
+  async function planDirUpload(
+    t: { serverId: string; rootId: string },
+    srvName: string,
+    dirName: string,
+    dirAbs: string,
+    dirRel: string,
+    files: { name: string; relPath: string; size: number; mtimeMs: number }[]
+  ): Promise<{ children: GroupChildSpec[]; skipped: number }> {
+    const remoteOf = (rel: string) => `${dirName}/${rel}`;
+    const localOf = (rel: string) => `${dirAbs}/${rel}`;
+    // pass1：不带 hash（省首传的哈希计算——服务端 missing/differ 只看 size）
+    const r1 = await serverCheck(t.serverId, t.rootId, files.map((f) => ({ path: remoteOf(f.relPath), size: f.size })));
+    const st1 = new Map<string, CheckState>(r1.map((x) => [x.path, x.state]));
+    // pass2：size 相符但无哈希证据（unknown）的条目——算本地 SHA-256 复查
+    const unknowns = files.filter((f) => st1.get(remoteOf(f.relPath)) === "unknown");
+    const st2 = new Map<string, CheckState>();
+    const shaOf = new Map<string, string>();
+    if (unknowns.length > 0) {
+      const hashes = (await invoke<(string | null)[]>("fs_file_hashes", {
+        rootId: api.active().rootId,
+        // fs_file_hashes 按**根相对**路径解析：被遍历目录自身要计入 rel（旧缺陷修复）
+        rels: unknowns.map((f) => (dirRel ? `${dirRel}/${f.relPath}` : f.relPath)),
+      })) as (string | null)[];
+      const withHash: { path: string; size: number; hash?: string }[] = [];
+      unknowns.forEach((f, i) => {
+        const h = hashes[i];
+        if (h) {
+          withHash.push({ path: remoteOf(f.relPath), size: f.size, hash: h });
+          shaOf.set(f.relPath, h);
+        } else st2.set(remoteOf(f.relPath), "unknown"); // 本地读不到：保守按 unknown→覆盖上传
+      });
+      if (withHash.length > 0) {
+        const r2 = await serverCheck(t.serverId, t.rootId, withHash);
+        for (const x of r2) st2.set(x.path, x.state);
+      }
+    }
+    const children: GroupChildSpec[] = [];
+    const differ: { rel: string; name: string; size: number; mtimeMs: number }[] = [];
+    let skipped = 0;
+    for (const f of files) {
+      const rp = remoteOf(f.relPath);
+      const state = st2.get(rp) ?? st1.get(rp) ?? "missing";
+      switch (state) {
+        case "same":
+          skipped++; // 相同自动跳过（用户决策）
+          break;
+        case "missing":
+          children.push({ name: f.name, remotePath: rp, localPath: localOf(f.relPath), size: f.size, baseHash: "-", journalRel: f.relPath, mtimeMs: f.mtimeMs, sha: shaOf.get(f.relPath) });
+          break;
+        case "unknown":
+          // 大小相符但无法断定内容（存量文件无哈希记录等）→ 覆盖语义上传：
+          // baseHash "" 跳乐观校验，服务端覆盖前仍存版本（需求3 兜底）。
+          children.push({ name: f.name, remotePath: rp, localPath: localOf(f.relPath), size: f.size, baseHash: "", journalRel: f.relPath, mtimeMs: f.mtimeMs, sha: shaOf.get(f.relPath) });
+          break;
+        default:
+          differ.push({ rel: f.relPath, name: f.name, size: f.size, mtimeMs: f.mtimeMs });
+      }
+    }
+    if (differ.length > 0) {
+      const decisions = await askUploadDiff(srvName, dirName, differ);
+      if (decisions === null) throw new Error("DIFF_CANCELLED");
+      for (const f of differ) {
+        if (decisions[f.rel] === "skip") {
+          skipped++;
+          continue;
+        }
+        children.push({ name: f.name, remotePath: remoteOf(f.rel), localPath: localOf(f.rel), size: f.size, baseHash: "", journalRel: f.rel, mtimeMs: f.mtimeMs, sha: shaOf.get(f.rel) });
+      }
+    }
+    return { children, skipped };
+  }
+
+  /** 同名不同内容询问对话框（Promise 化：null=整体取消本次目录上传）。 */
+  function askUploadDiff(
+    serverName: string,
+    dirName: string,
+    rows: { rel: string; name: string; size: number }[]
+  ): Promise<Record<string, "ovr" | "skip"> | null> {
+    return new Promise((resolve) => {
+      setDialog({
+        kind: "uploadDiff",
+        serverName,
+        dirName,
+        rows,
+        onDecide: (d) => {
+          setDialog({ kind: "none" });
+          resolve(d);
+        },
+      });
+    });
+  }
+
   function rename(e: FsEntry) {
     setDialog({
       kind: "prompt",
@@ -688,8 +991,8 @@ export default function App() {
           const a = api.active();
           await setActive({ ...a, rootId: id });
         }}
-        onOpenSettings={() => setDialog({ kind: "settings" })}
-        onOpenUsers={() => setDialog({ kind: "settings", tab: "account" })}
+        onOpenSettings={() => openSettings()}
+        onOpenUsers={() => openSettings("account")}
       />
 
       <main className="main">
@@ -729,6 +1032,7 @@ export default function App() {
             groupByKind={groupByKind}
             onGroupByKind={changeGroupByKind}
             onOpen={openEntry}
+            onPreview={previewEntry}
             onBreadcrumb={setPath}
             onRefresh={refresh}
             onMkdir={() =>
@@ -825,16 +1129,54 @@ export default function App() {
 
         {view === "transfers" && <TransfersView cfg={cfg} />}
 
-        {view === "ai" && (
-          <AIView cfg={cfg} onOpenSettings={() => setDialog({ kind: "settings" })} onJump={jumpTo} />
-        )}
+        {view === "ai" && <AIView cfg={cfg} onOpenSettings={() => openSettings()} onJump={jumpTo} />}
 
         {view === "search" && (
           <SearchView
             onOpen={openEntry}
+            onPreview={previewEntry}
             onLocate={(e) => {
               setView("files");
               setPath(e.path);
+            }}
+          />
+        )}
+
+        {/* 0.1.4（需求2）：设置为整页视图——左侧导航保持可见/可折叠，非浮动卡片 */}
+        {view === "settings" && (
+          <Settings
+            key={settingsTab ?? "open"}
+            cfg={cfg}
+            initialTab={settingsTab ?? undefined}
+            onClose={() => setView("files")}
+            onSave={async (next) => {
+              const saved = await api.saveConfig(next);
+              api.invalidateSource();
+              setCfg({ ...saved });
+              applyTheme(saved.ui.theme);
+              await refresh();
+            }}
+            onLogin={(id) => setDialog({ kind: "login", serverId: id, from: "settings" })}
+            onSwitchSource={async (target) => {
+              // 0.3.7 需求6：设置页内切换数据源，切完仍停留本页（stay=true）。
+              // 未登录服务端以游客身份切换（登录走「服务端」页签按钮/弹出的登录框）。
+              if (target.kind === "local") await pickLocalRoot(target.rootId, true);
+              else await pickServer(target.serverId, true);
+              await refresh();
+            }}
+          />
+        )}
+
+        {/* 0.1.7：查看覆盖层——盖住主区文件列表（保留其下筛选/选中状态），
+            仅 files/search 视图生效（切视图的清除 effect 之前不闪现） */}
+        {viewing && (view === "files" || view === "search") && (
+          <FileViewer
+            entry={viewing}
+            decoder={cfg.ui.videoDecoder}
+            onExit={() => setViewing(null)}
+            onDownload={(e) => {
+              setViewing(null);
+              void download([e]);
             }}
           />
         )}
@@ -866,10 +1208,12 @@ export default function App() {
         <LoginModal
           serverId={dialog.serverId}
           cfg={cfg}
-          onClose={() =>
+          onClose={() => {
             // 从设置（账户/服务器页）打开的登录框：取消也回到账户页，不落主界面
-            setDialog(dialog.from === "settings" ? { kind: "settings", tab: "account" } : { kind: "none" })
-          }
+            const back = dialog.from === "settings";
+            setDialog({ kind: "none" });
+            if (back) openSettings("account");
+          }}
           onDone={async () => {
             loginPrompted.current = ""; // 登录成功：重置，未来会话失效仍可自动弹一次
             const c = await api.loadConfig();
@@ -877,8 +1221,10 @@ export default function App() {
             applyTheme(c.ui.theme);
             const rs = await api.fetchRoots(dialog.serverId).catch(() => [] as ServerRoot[]);
             setRoots(rs);
-            // 登录成功后回到账户页（0.6.1）：从设置打开的登录框不再落回主界面
-            setDialog(dialog.from === "settings" ? { kind: "settings", tab: "account" } : { kind: "none" });
+            // 登录成功后回到账户页：从设置打开的登录框不再落回主界面
+            const back = dialog.from === "settings";
+            setDialog({ kind: "none" });
+            if (back) openSettings("account");
             const cur = api.active();
             await setActive({
               kind: "server",
@@ -886,21 +1232,6 @@ export default function App() {
               rootId: cur.kind === "server" && cur.serverId === dialog.serverId ? cur.rootId : rs?.[0]?.id ?? "",
             });
           }}
-        />
-      )}
-      {dialog.kind === "settings" && (
-        <Settings
-          cfg={cfg}
-          initialTab={dialog.tab}
-          onClose={() => setDialog({ kind: "none" })}
-          onSave={async (next) => {
-            const saved = await api.saveConfig(next);
-            api.invalidateSource();
-            setCfg({ ...saved });
-            applyTheme(saved.ui.theme);
-            await refresh();
-          }}
-          onLogin={(id) => setDialog({ kind: "login", serverId: id, from: "settings" })}
         />
       )}
       {dialog.kind === "preview" && (
@@ -932,8 +1263,20 @@ export default function App() {
         <UploadToDialog
           cfg={cfg}
           fileName={dialog.entry.name}
+          isDir={dialog.entry.isDir}
           onCancel={() => setDialog({ kind: "none" })}
-          onSubmit={(targets) => uploadToServers(dialog.entry, targets)}
+          onSubmit={(targets) =>
+            dialog.entry.isDir ? uploadDirToServers(dialog.entry, targets) : uploadToServers(dialog.entry, targets)
+          }
+        />
+      )}
+
+      {dialog.kind === "uploadDiff" && (
+        <UploadDiffDialog
+          serverName={dialog.serverName}
+          dirName={dialog.dirName}
+          rows={dialog.rows}
+          onDecide={dialog.onDecide}
         />
       )}
 
@@ -943,12 +1286,18 @@ export default function App() {
           y={ctx.y}
           items={
             [
-              { label: ctx.entry.isDir ? "打开" : "预览", icon: <IconEye size={13} />, onSelect: () => openEntry(ctx.entry) },
+              ...(ctx.entry.isDir
+                ? [{ label: "打开", icon: <IconEye size={13} />, onSelect: () => openEntry(ctx.entry) }]
+                : viewableType(ctx.entry)
+                  ? // 0.1.7 查看/预览分离：可预览类型两项都给（查看=主区大图，预览=弹窗小图）
+                    [
+                      { label: "查看", icon: <IconExpand size={13} />, onSelect: () => openEntry(ctx.entry) },
+                      { label: "预览", icon: <IconEye size={13} />, onSelect: () => previewEntry(ctx.entry) },
+                    ]
+                  : [{ label: "预览", icon: <IconEye size={13} />, onSelect: () => previewEntry(ctx.entry) }]),
               {
-                label: "上传到远程…",
+                label: ctx.entry.isDir ? "上传目录到远程…" : "上传到远程…",
                 icon: <IconUpload size={13} />,
-                disabled: ctx.entry.isDir,
-                hint: "目录上传暂不支持，请进入目录选择文件",
                 onSelect: () => setDialog({ kind: "uploadTo", entry: ctx.entry }),
               },
             ] as CtxItem[]

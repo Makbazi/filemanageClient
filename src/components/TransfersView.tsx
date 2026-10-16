@@ -1,15 +1,21 @@
-// 传输管理页（0.6.0 需求4/5/6）：任务注册表全量视图——
+// 传输管理页（需求4/5/6）：任务注册表全量视图——
 // 暂停→断点续传 / 失败重试 / 冲突覆盖重试 / 取消 / 移除 / 清除已完成。
 // 与 TransferPanel（浮出小窗）共用 transfer.ts 注册表与 STATUS_LABEL。
-import { useEffect, useState } from "react";
+// 0.2.0 需求41：目录上传聚合为一条组行（文件计数；动作经 rowActions 走组级 API，
+// 移除/清除已完成会级联清理子任务）。
+// 0.3.2：未完成上传账本——重启后进程内任务丢失，这里从 localdb 账本列出
+// "未完成的目录上传组"，[继续]=重建子任务走会话续传+相同跳过，[放弃]=作废
+// 服务端残留会话（清 staging 碎片）。
+import { useCallback, useEffect, useState } from "react";
 import {
   subscribe,
-  cancelTask,
-  pauseTask,
-  resumeTask,
-  overwriteRetry,
+  rowActions,
   removeTask,
   clearFinished,
+  listJournalPending,
+  resumeJournalGroup,
+  abandonJournalGroup,
+  type JournalGroupRow,
   type TransferTask,
 } from "../lib/transfer";
 import { STATUS_LABEL } from "../lib/transtypes";
@@ -24,6 +30,14 @@ interface Props {
 export default function TransfersView(p: Props) {
   const [tasks, setTasks] = useState<TransferTask[]>([]);
   useEffect(() => subscribe(setTasks), []);
+  // 未完成账本组（挂载即查；操作后刷新）
+  const [journal, setJournal] = useState<JournalGroupRow[]>([]);
+  const refreshJournal = useCallback(() => {
+    void listJournalPending().then(setJournal);
+  }, []);
+  useEffect(() => {
+    refreshJournal();
+  }, [refreshJournal]);
   const serverName = (id: string) => p.cfg.servers.find((s) => s.id === id)?.name ?? id;
   const hasFinished = tasks.some((t) => t.status === "done" || t.status === "cancelled");
   // 需求6：上传/下载在同一界面，可筛选区分
@@ -58,6 +72,44 @@ export default function TransfersView(p: Props) {
           </button>
         </div>
       </div>
+      {journal.filter((g) => !tasks.some((t) => t.id === g.gid)).length > 0 && (
+        <div className="card">
+          <div className="page-head">
+            <p className="dim">未完成的上传（上次退出/中断遗留，可从断点继续；已传相同的文件自动跳过）</p>
+          </div>
+          {journal
+            .filter((g) => !tasks.some((t) => t.id === g.gid))
+            .map((g) => (
+              <div key={g.gid} className="journal-row">
+                <span className="ficon k-other">
+                  <IconUpload size={14} />
+                </span>
+                <span className="journal-label" title={`${g.localAbs} → ${serverName(g.serverId)}/${g.remotePrefix}`}>
+                  {g.label || g.remotePrefix} <span className="dim">→ {serverName(g.serverId)}</span>
+                </span>
+                <span className="dim">
+                  {g.doneFiles}/{g.totalFiles} 个文件
+                </span>
+                <button
+                  className="btn small primary"
+                  onClick={() => {
+                    void resumeJournalGroup(g).then(() => setTimeout(refreshJournal, 300));
+                  }}
+                >
+                  继续
+                </button>
+                <button
+                  className="btn small"
+                  onClick={() => {
+                    void abandonJournalGroup(g).then(refreshJournal);
+                  }}
+                >
+                  放弃
+                </button>
+              </div>
+            ))}
+        </div>
+      )}
       {tasks.length === 0 ? (
         <div className="card">
           <div className="empty">暂无传输任务</div>
@@ -83,6 +135,7 @@ export default function TransfersView(p: Props) {
                 const resumable = t.serverId !== ""; // 入队任务参数完整才可暂停/续传/重试
                 const conflict = t.message.includes("已存在");
                 const removable = t.status !== "running" && t.status !== "queued";
+                const act = rowActions(t); // 需求41：组行自动选路到组级 API
                 return (
                   <tr key={t.id} className="row">
                     <td className="dim">{t.kind === "upload" ? "上传" : "下载"}</td>
@@ -105,7 +158,8 @@ export default function TransfersView(p: Props) {
                         <div className="progress-bar" style={{ width: `${t.status === "done" ? 100 : pct}%` }} />
                       </div>
                       <div className="transfer-meta dim">
-                        {fmtSize(t.sent)} / {t.total > 0 ? fmtSize(t.total) : "?"} · {pct}%
+                        {fmtSize(t.sent)} / {t.total > 0 ? fmtSize(t.total) : "?"}
+                        {t.isGroup ? ` · ${t.files}/${t.filesTotal} 个文件` : ` · ${pct}%`}
                       </div>
                     </td>
                     <td className="dim">{t.status === "running" && t.speed > 0 ? `${fmtSize(t.speed)}/s` : "-"}</td>
@@ -115,26 +169,26 @@ export default function TransfersView(p: Props) {
                     <td>
                       <div className="row-actions">
                         {t.status === "running" && resumable && (
-                          <button className="mini" title="暂停（保留进度，可继续）" onClick={() => void pauseTask(t.id)}>
+                          <button className="mini" title="暂停（保留进度，可继续）" onClick={() => void act.pause()}>
                             <IconPause size={14} />
                           </button>
                         )}
                         {t.status === "paused" && resumable && (
-                          <button className="mini" title="继续（断点续传）" onClick={() => resumeTask(t.id)}>
+                          <button className="mini" title={t.isGroup ? "继续（整组断点续传）" : "继续（断点续传）"} onClick={() => act.resume()}>
                             <IconPlay size={14} />
                           </button>
                         )}
                         {t.status === "error" && resumable && (
                           <button
                             className="mini"
-                            title={conflict ? "覆盖重试（服务端覆盖前先存版本）" : "重试"}
-                            onClick={() => (conflict ? overwriteRetry(t.id) : resumeTask(t.id))}
+                            title={t.isGroup ? "重试失败文件（冲突文件按覆盖重试）" : conflict ? "覆盖重试（服务端覆盖前先存版本）" : "重试"}
+                            onClick={() => (conflict ? act.overwriteRetry() : act.retry())}
                           >
                             <IconRefresh size={14} />
                           </button>
                         )}
                         {(t.status === "running" || t.status === "queued") && (
-                          <button className="mini danger" title="取消" onClick={() => void cancelTask(t.id)}>
+                          <button className="mini danger" title={t.isGroup ? "取消整组" : "取消"} onClick={() => void act.cancel()}>
                             <IconX size={14} />
                           </button>
                         )}
