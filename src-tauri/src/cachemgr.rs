@@ -174,6 +174,93 @@ fn media_dir_size(dir: &Path) -> (usize, u64) {
     (n, bytes)
 }
 
+/// 缓存目录信息（0.3.8 需求5，设置页展示）：当前目录/默认目录/是否自定义/用量。
+#[tauri::command]
+pub fn cache_dir_info(app: AppHandle) -> Result<serde_json::Value, String> {
+    let st = state(&app);
+    let dir = st.media_cache_dir();
+    let (n, bytes) = media_dir_size(&dir);
+    Ok(json!({
+        "dir": dir.to_string_lossy(),
+        "defaultDir": st.media_cache_dir_default().to_string_lossy(),
+        "isDefault": st.config().cache.dir.clone().unwrap_or_default().trim().is_empty(),
+        "files": n,
+        "bytes": bytes,
+    }))
+}
+
+/// 切换/迁移媒体缓存目录（0.3.8 需求5）：
+///  - dir 空/None=恢复默认 `<appcache>/media`；否则为目标绝对路径（须可创建）；
+///  - migrate=true：把旧目录条目尽力搬过去（rename 跨卷退化 copy+删源；单条失败
+///    保留源不阻断——缓存皆可在需要时重建，绝不丢用户源文件：本地模式 hard_link
+///    条目 rename 只断链接、copy 出副本后删链接，均不触源）；
+///  - 落盘配置 + 重扫计数 + 一次配额淘汰。在途查看/下载指向旧目录的会话会因
+///    路径迁移失败而报错重试（重新入缓存），属可接受的显式用户操作代价。
+#[tauri::command]
+pub fn cache_set_dir(app: AppHandle, dir: Option<String>, migrate: Option<bool>) -> Result<serde_json::Value, String> {
+    let st = state(&app);
+    let want = dir.clone().unwrap_or_default();
+    let want = want.trim().to_string();
+    let old = st.media_cache_dir();
+    let new = if want.is_empty() {
+        st.media_cache_dir_default()
+    } else {
+        PathBuf::from(&want)
+    };
+    std::fs::create_dir_all(&new).map_err(|e| format!("无法创建目标缓存目录: {e}"))?;
+    let canon_new = std::fs::canonicalize(&new).map_err(|e| format!("目标缓存目录不可用: {e}"))?;
+    let canon_old = std::fs::canonicalize(&old).ok();
+    let same = canon_old.as_deref() == Some(canon_new.as_path());
+    let mut moved = 0usize;
+    let mut failed = 0usize;
+    if migrate.unwrap_or(false) && !same {
+        if let Ok(rd) = fs::read_dir(&old) {
+            for e in rd.flatten() {
+                let p = e.path();
+                let Ok(m) = e.metadata() else { continue };
+                if !m.is_file() {
+                    continue;
+                }
+                let dst = canon_new.join(e.file_name());
+                if fs::rename(&p, &dst).is_ok() {
+                    moved += 1;
+                    continue;
+                }
+                // 跨卷/权限：copy+删源兜底；再失败保留源（新目录条目缺失自愈重建）
+                if fs::copy(&p, &dst).is_ok() {
+                    let _ = fs::remove_file(&p);
+                    moved += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+        }
+    }
+    let want_for_store = want.clone();
+    st.update(&app, move |c| {
+        c.cache.dir = if want_for_store.is_empty() {
+            None
+        } else {
+            Some(want_for_store)
+        };
+    })?;
+    // 广播配置变更（约定13 通道）：App/设置页的 cfg 草稿随 fm-config-changed
+    // 重取 cache.dir，避免"保存其他设置时旧快照把新目录冲掉"。
+    {
+        use tauri::Emitter;
+        let _ = app.emit("fm-config-changed", ());
+    }
+    init_counter(&st);
+    enforce(&st);
+    Ok(json!({
+        "dir": st.media_cache_dir().to_string_lossy(),
+        "isDefault": want.is_empty(),
+        "moved": moved,
+        "failed": failed,
+        "noop": same,
+    }))
+}
+
 /// 手动清空媒体缓存（在途下载/续传会被打断并按需重建——显式用户操作，可接受）。
 #[tauri::command]
 pub fn cache_clear(app: AppHandle) -> Result<u64, String> {

@@ -81,6 +81,178 @@ fn build_tray(app: &mut tauri::App) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+// ---------- 媒体缓存自定义协议 fmc（0.3.8 需求5） ----------
+//
+// 缓存目录可在设置页改到应用缓存目录之外（旧目录可迁移），asset 协议的静态
+// scope（$APPCACHE/**）覆盖不到任意路径；`<img>/<video>/<audio>/<embed>` 一律
+// 改走 `fmc://localhost/m?p=<编码绝对路径>`（Windows 形态 `http://fmc.localhost/…`，
+// 前端 mediaUrl 按平台分流）。安全纪律**严于放宽 scope**：canonicalize 后必须
+// 位于**当前媒体缓存目录**内（同 media_read_bytes/open_media 纪律），否则 404；
+// 支持单段 Range（音视频拖拽）。协议响应为同步全字节——视频媒体元素恒带 Range
+// 分段拉取，内存占用可控。
+
+/// 极简 percent-decode（`%XX`；非法序列原样保留）。
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn fmc_ctype(p: &std::path::Path) -> &'static str {
+    match p
+        .extension()
+        .and_then(|x| x.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "mp4" | "m4v" | "mov" => "video/mp4",
+        "webm" => "video/webm",
+        "mkv" | "mpg" | "mpeg" | "avi" | "hevc" | "h265" | "h264" | "m2ts" | "ogv" => "video/mp4",
+        "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "ogg" | "oga" => "audio/ogg",
+        "wav" => "audio/wav",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
+}
+
+fn fmc_http_error(code: tauri::http::StatusCode, msg: &str) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(code)
+        .header(tauri::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(msg.as_bytes().to_vec())
+        .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
+/// 单段 Range 解析："bytes=a-b" | "bytes=a-" | "bytes=-n"（后缀）。
+/// 返回 Some((start,end)) 合法；None=无 Range；Some(None)=非法（416）。
+fn parse_range(header: &str, total: u64) -> Option<Option<(u64, u64)>> {
+    let spec0 = header.trim().strip_prefix("bytes=")?;
+    if total == 0 {
+        return None; // 空文件不走分段：落全量 200（长度为 0）
+    }
+    let spec = spec0.split(',').next().unwrap_or("").trim();
+    let (a, b) = spec.split_once('-')?;
+    let last = total - 1;
+    if a.is_empty() {
+        let n = b.trim().parse::<u64>().ok()?;
+        if n == 0 {
+            return Some(None);
+        }
+        Some(Some((total.saturating_sub(n), last)))
+    } else {
+        let start = a.trim().parse::<u64>().ok()?;
+        if start > last {
+            return Some(None);
+        }
+        let end = if b.trim().is_empty() {
+            last
+        } else {
+            b.trim().parse::<u64>().ok()?.min(last)
+        };
+        if start > end {
+            return Some(None);
+        }
+        Some(Some((start, end)))
+    }
+}
+
+fn fmc_protocol(
+    ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    use tauri::http::header;
+    let st = config::state(ctx.app_handle());
+    let enc = match request.uri().query().unwrap_or("").split('&').find_map(|kv| kv.strip_prefix("p=")) {
+        Some(v) => v,
+        None => return fmc_http_error(tauri::http::StatusCode::BAD_REQUEST, "missing path"),
+    };
+    let path = percent_decode(enc);
+    let dir = match std::fs::canonicalize(st.media_cache_dir()) {
+        Ok(d) => d,
+        Err(_) => return fmc_http_error(tauri::http::StatusCode::NOT_FOUND, "cache dir unavailable"),
+    };
+    let abs = match std::fs::canonicalize(&path) {
+        Ok(p) => p,
+        Err(_) => return fmc_http_error(tauri::http::StatusCode::NOT_FOUND, "not found"),
+    };
+    // 守卫：仅当前媒体缓存目录内的文件（越界与默认目录切换后的旧路径一律 404）
+    if !abs.starts_with(&dir) || !abs.is_file() {
+        return fmc_http_error(tauri::http::StatusCode::NOT_FOUND, "not found");
+    }
+    let total = match abs.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return fmc_http_error(tauri::http::StatusCode::NOT_FOUND, "not found"),
+    };
+    let ctype = fmc_ctype(&abs).to_string();
+    let range_hdr = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let seg = range_hdr.as_deref().and_then(|h| parse_range(h, total));
+    if let Some(seg) = seg {
+        let (start, end) = match seg {
+            Some(p) => p,
+            None => {
+                return fmc_http_error(tauri::http::StatusCode::RANGE_NOT_SATISFIABLE, "bad range")
+            }
+        };
+        let len = (end - start + 1) as usize;
+        let mut f = match std::fs::File::open(&abs) {
+            Ok(f) => f,
+            Err(_) => return fmc_http_error(tauri::http::StatusCode::NOT_FOUND, "not found"),
+        };
+        if f.seek(SeekFrom::Start(start)).is_err() {
+            return fmc_http_error(tauri::http::StatusCode::INTERNAL_SERVER_ERROR, "seek failed");
+        }
+        let mut buf = Vec::with_capacity(len.min(64 << 20));
+        if f.take(len as u64).read_to_end(&mut buf).is_err() {
+            return fmc_http_error(tauri::http::StatusCode::INTERNAL_SERVER_ERROR, "read failed");
+        }
+        let cr = format!("bytes {}-{}/{}", start, start + buf.len() as u64 - 1, total);
+        return tauri::http::Response::builder()
+            .status(tauri::http::StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, ctype)
+            .header(header::CONTENT_LENGTH, buf.len())
+            .header(header::CONTENT_RANGE, cr)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .body(buf)
+            .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()));
+    }
+    let buf = match std::fs::read(&abs) {
+        Ok(b) => b,
+        Err(_) => return fmc_http_error(tauri::http::StatusCode::NOT_FOUND, "not found"),
+    };
+    tauri::http::Response::builder()
+        .status(tauri::http::StatusCode::OK)
+        .header(header::CONTENT_TYPE, ctype)
+        .header(header::CONTENT_LENGTH, buf.len())
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(buf)
+        .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
 #[tauri::command]
 fn get_config(app: AppHandle) -> AppConfig {
     config::state(&app).config()
@@ -126,6 +298,9 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 0.3.8 需求5：媒体缓存出图协议（自定义缓存目录不受 asset 静态 scope 覆盖；
+        // 守卫=当前缓存目录内 + Range 支持，见 fmc_protocol 注释）
+        .register_uri_scheme_protocol("fmc", fmc_protocol)
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             let cache = app.path().app_cache_dir()?;
@@ -201,6 +376,9 @@ pub fn run() {
             cachemgr::media_read_bytes,
             cachemgr::cache_stats,
             cachemgr::cache_clear,
+            // 0.3.8 需求5：缓存目录显示/切换/迁移
+            cachemgr::cache_dir_info,
+            cachemgr::cache_set_dir,
             // 0.3.2：上传账本（重启续传兜底）
             localdb::lg_new_group,
             localdb::lg_set_children,
@@ -237,6 +415,8 @@ pub fn run() {
             // 0.3.7 需求3 第 4 档：ffmpeg 解码+原生渲染（媒体信息/逐帧解码/音轨提取）
             player::video_media_info,
             player::ffmpeg_frame,
+            // 0.3.8 需求2：渲染档批量连续解码（一次进程解 N 帧，帧率对齐源）
+            player::ffmpeg_frames,
             player::ffmpeg_audio_track,
             // 记住的服务端账户密码（需求3）
             serverapi::cred_take,

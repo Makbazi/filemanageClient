@@ -4,7 +4,6 @@
 // （core:window:allow-set-fullscreen，DOM requestFullscreen 因 webkitgtk
 // 支持参差弃用）；双击图片关闭查看；Esc 先退全屏、再关查看。
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { FsEntry } from "../lib/types";
@@ -129,7 +128,7 @@ export default function FileViewer(p: Props) {
     try {
       const playable = await api.ffmpegPlayable(path, force);
       if (!live(gen)) return;
-      setUrl(convertFileSrc(playable));
+      setUrl(api.mediaUrl(playable));
       setVErr(false);
       setVKey((k) => k + 1);
     } catch (ex) {
@@ -210,7 +209,7 @@ export default function FileViewer(p: Props) {
                 return;
               }
             }
-            setUrl(convertFileSrc(path));
+            setUrl(api.mediaUrl(path));
           }
         }
       } catch (ex) {
