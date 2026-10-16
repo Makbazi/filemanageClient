@@ -47,7 +47,8 @@ fn be16(buf: &[u8], i: usize) -> Option<usize> {
 /// 否则 None。按段链前进：各 marker 用头内长度跳段；SOS 之后进入熵数据扫描
 /// （FF00 填充字节/RST 段/扫描间 DHT 合法，progressive 多扫描不误伤），遇 EOI
 /// 收束。校验只保证"结构完整"，解码侧还会二次把关。
-fn jpeg_full_len(buf: &[u8], start: usize) -> Option<usize> {
+/// 0.3.9：pub(crate)——player.rs 渲染档批量帧切分复用同一段链纪律。
+pub(crate) fn jpeg_full_len(buf: &[u8], start: usize) -> Option<usize> {
     // 合法 JPEG：FFD8 之后必紧跟 0xFF 开头的下一个段（填充 FFFF 也满足）
     if buf.get(start) != Some(&0xFF) || buf.get(start + 1) != Some(&0xD8) || buf.get(start + 2) != Some(&0xFF) {
         return None;

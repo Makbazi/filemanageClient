@@ -703,26 +703,23 @@ pub async fn ffmpeg_frame(
     Ok(tauri::ipc::Response::new(bytes.as_ref().clone()))
 }
 
-/// 从 image2pipe 连续 mjpeg 输出中切帧（FFD8…FFD9 扫描）。截断尾（进程被杀/
-/// 输出不全）保留已完整的帧，不报错。
+/// 从 image2pipe 连续 mjpeg 输出中切帧。
+/// 0.3.9（修渲染档黑屏）：旧实现"找 FFD8 后截到第一个 FFD9"的朴素扫描是错的——
+/// 段载荷（DHT/DQT 表字节）里可以合法出现 FF D9 / FF D8 字节对（熵数据外的
+/// 0xFF 不做填充转义），一旦命中即产出"半帧"损坏 JPEG，前端 createImageBitmap
+/// 静默 reject → 音频在走、画面全黑。改用 thumb.rs 的段链校验器（与 RAW 内嵌
+/// 预览提取同一纪律）：按 marker 长度逐段前进、SOS 后扫描熵数据直到真 EOI，
+/// 只输出结构完整的帧。截断尾（进程被杀/输出不全）保留已完整的帧，不报错。
 fn split_jpegs(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let mut i = 0usize;
-    while i + 1 < buf.len() {
-        if buf[i] == 0xFF && buf[i + 1] == 0xD8 {
-            let mut j = i + 2;
-            while j + 1 < buf.len() {
-                if buf[j] == 0xFF && buf[j + 1] == 0xD9 {
-                    break;
-                }
-                j += 1;
-            }
-            if j + 1 < buf.len() {
-                out.push(buf[i..j + 2].to_vec());
-                i = j + 2;
+    while i + 3 < buf.len() {
+        if buf[i] == 0xFF && buf[i + 1] == 0xD8 && buf[i + 2] == 0xFF {
+            if let Some(len) = crate::thumb::jpeg_full_len(buf, i) {
+                out.push(buf[i..i + len].to_vec());
+                i += len;
                 continue;
             }
-            break;
         }
         i += 1;
     }
