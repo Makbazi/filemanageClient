@@ -231,6 +231,11 @@ pub struct CacheConf {
     /// 缩略图内存缓存上限 MB（默认 2048 = 2GB）
     #[serde(default = "default_cache_mem_mb")]
     pub max_mem_mb: u64,
+    /// 媒体/缩略图缓存目录（0.3.8 需求5）：空=默认 `<app_cache_dir>/media`；
+    /// 可改到任意可写目录（迁移在设置页触发）。自定义目录经 fmc:// 自定义
+    /// 协议出图（asset 协议静态 scope 覆盖不到；守卫见 lib.rs::fmc_protocol）。
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 fn default_cache_disk_mb() -> u64 {
@@ -245,6 +250,7 @@ impl Default for CacheConf {
         Self {
             max_disk_mb: default_cache_disk_mb(),
             max_mem_mb: default_cache_mem_mb(),
+            dir: None,
         }
     }
 }
@@ -386,13 +392,17 @@ impl AppState {
         }
         let _ = std::fs::create_dir_all(cache_dir.join("media"));
         let db = crate::localdb::open_and_migrate(&data_dir)?;
-        Ok(Self {
+        let st = Self {
             data_dir,
             cache_dir,
             config: RwLock::new(cfg),
             db: std::sync::Mutex::new(db),
             keyring_ok,
-        })
+        };
+        // 0.3.8 需求5：自定义缓存目录也要存在（配置了不可写路径时静默失败，
+        // 写点自然报错回退重建；启动绝不因缓存目录炸掉）
+        let _ = std::fs::create_dir_all(st.media_cache_dir());
+        Ok(st)
     }
 
     pub fn config(&self) -> AppConfig {
@@ -487,8 +497,21 @@ impl AppState {
         self.data_dir.join("versions")
     }
 
-    /// 媒体预览缓存目录（asset 协议已授权该目录）。
+    /// 媒体预览缓存目录（0.3.8 需求5：cache.dir 可重定位，空=默认
+    /// `<app_cache_dir>/media`）。默认目录同时受 asset 协议授权；自定义目录
+    /// 经 fmc:// 自定义协议出图（lib.rs::fmc_protocol，守卫=本目录内文件）。
     pub fn media_cache_dir(&self) -> PathBuf {
+        let d = self.config().cache.dir.clone().unwrap_or_default();
+        let d = d.trim();
+        if d.is_empty() {
+            self.cache_dir.join("media")
+        } else {
+            PathBuf::from(d)
+        }
+    }
+
+    /// 默认媒体缓存目录（设置页展示"恢复默认"目标用）。
+    pub fn media_cache_dir_default(&self) -> PathBuf {
         self.cache_dir.join("media")
     }
 }

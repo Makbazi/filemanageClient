@@ -125,6 +125,9 @@ export interface CacheConf {
   maxDiskMb: number;
   /** 缩略图内存缓存上限 MB（默认 2048 = 2GB） */
   maxMemMb: number;
+  /** 媒体/缩略图缓存目录（0.3.8 需求5）：null/空=默认 `<appcache>/media`；
+   *  设置页"切换/迁移"命令（cache_set_dir）维护，快照透传时不可丢 */
+  dir?: string | null;
 }
 
 export interface ServerRoot {

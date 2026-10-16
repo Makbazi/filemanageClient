@@ -1,8 +1,8 @@
 // 文件预览（需求11；0.1.7 查看/预览分离）：预览=本弹窗（缩放式"缩略图"观感），
-// 图片/视频/音频/PDF 统一经媒体缓存 + asset 协议（无大小限制，大图片可预览）；
+// 图片/视频/音频/PDF 统一经媒体缓存 + fmc 协议出图（0.3.8 需求5；缓存目录可
+// 重定位后 asset 静态 scope 不再适用——见 api.mediaUrl）；
 // 文本 data URL（≤8MiB）；其余类型提示下载。双击可预览类型在主区全屏查看（FileViewer）。
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { FsEntry } from "../lib/types";
 import * as api from "../lib/api";
@@ -60,7 +60,7 @@ export default function PreviewModal(p: Props) {
           const path = await src.mediaCache(e);
           if (!cancelled) {
             setMediaPath(path);
-            setMediaUrl(convertFileSrc(path));
+            setMediaUrl(api.mediaUrl(path));
           }
         }
       } catch (ex) {
@@ -92,7 +92,7 @@ export default function PreviewModal(p: Props) {
     setFfmBusyBoth(true);
     try {
       const playable = await api.ffmpegPlayable(mediaPath, true);
-      setMediaUrl(convertFileSrc(playable));
+      setMediaUrl(api.mediaUrl(playable));
       setVErr(false);
     } catch (ex) {
       const m = String(ex);

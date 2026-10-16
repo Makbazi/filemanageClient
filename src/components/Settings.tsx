@@ -15,12 +15,15 @@ import { fmtSize } from "../lib/format";
 import { clearThumbCache } from "../lib/thumbcache";
 import {
   active,
+  cacheDirInfo,
+  cacheSetDir,
   credForget,
   fetchRoots,
   ffmpegProbe,
   serverChangePassword,
   serverLogout,
   testPlayerCommand,
+  type CacheDirInfo,
 } from "../lib/api";
 import { THEMES } from "../lib/theme";
 import { Confirm, Modal } from "./Modals";
@@ -62,6 +65,12 @@ export default function Settings(p: Props) {
   // 0.3.2：媒体/缩略图缓存用量（进"传输"页签时刷新）与清空状态
   const [cacheStats, setCacheStats] = useState<{ files: number; bytes: number; limitBytes: number } | null>(null);
   const [clearing, setClearing] = useState(false);
+  // 0.3.8 需求5：缓存目录显示/切换/迁移状态
+  const [dirInfo, setDirInfo] = useState<CacheDirInfo | null>(null);
+  const [migrateDir, setMigrateDir] = useState(true);
+  const [dirBusy, setDirBusy] = useState(false);
+  const [dirMsg, setDirMsg] = useState("");
+  const [dirErr, setDirErr] = useState("");
   const [srvForm, setSrvForm] = useState<{ idx: number; conf: ServerConf } | null>(null);
   // 明文 http 保存前的二次确认
   const [httpWarn, setHttpWarn] = useState<ServerConf | null>(null);
@@ -207,13 +216,47 @@ export default function Settings(p: Props) {
   const cacheSet = (patch: Partial<AppConfig["cache"]>) =>
     setCfg({ ...cfg, cache: { ...cfg.cache, ...patch } });
 
-  // 0.3.2：进"传输"页签拉一次媒体缓存用量
+  // 0.3.2：进"传输"页签拉一次媒体缓存用量；0.3.8 需求5：连带刷新缓存目录信息
   useEffect(() => {
     if (tab !== "transfer") return;
     invoke<{ files: number; bytes: number; limitBytes: number }>("cache_stats")
       .then(setCacheStats)
       .catch(() => setCacheStats(null));
+    void cacheDirInfo().then(setDirInfo).catch(() => setDirInfo(null));
   }, [tab]);
+
+  // 0.3.8 需求5：切换/迁移/恢复默认缓存目录（命令即时落盘并广播 fm-config-changed，
+  // 不依赖"保存传输设置"按钮；草稿 cfg 同步 dir 防后续保存旧快照冲掉）
+  async function switchCacheDir(to: string | null) {
+    setDirBusy(true);
+    setDirMsg("");
+    setDirErr("");
+    try {
+      const r = await cacheSetDir(to ?? "", migrateDir);
+      if (r.noop) {
+        setDirMsg("目标目录与当前缓存目录相同，无需变更");
+      } else if (!to) {
+        setDirMsg("已恢复默认缓存目录");
+      } else {
+        setDirMsg(
+          migrateDir
+            ? `已切换缓存目录，迁移 ${r.moved} 个条目${r.failed > 0 ? `（${r.failed} 个未成功——缺失条目将在查看时自动重建）` : ""}`
+            : "已切换缓存目录（未迁移旧条目，旧目录内容保留在设置所示的原路径）"
+        );
+      }
+      const [info2, stats] = await Promise.all([
+        cacheDirInfo(),
+        invoke<{ files: number; bytes: number; limitBytes: number }>("cache_stats"),
+      ]);
+      setDirInfo(info2);
+      setCacheStats(stats);
+      setCfg({ ...cfg, cache: { ...cfg.cache, dir: info2.isDefault ? null : info2.dir } });
+    } catch (ex) {
+      setDirErr(String(ex));
+    } finally {
+      setDirBusy(false);
+    }
+  }
 
   const commitPlayer = () => {
     const v = playerDraft.trim();
@@ -447,9 +490,9 @@ export default function Settings(p: Props) {
             启动时恢复各服务端登录状态（需求9：上次保持登录的重开后仍是登录态；
             关闭则每次启动全部退出——已记住的密码保留，退出状态的服务端可一键快速重登）
           </label>
-          {/* 0.3.0 需求1 / 0.3.3 需求3 / 0.3.7 需求3：H.264/H.265 播放四档——
-              系统解码器（默认）/ ffmpeg 转码 / ffmpeg 解码+原生渲染（逐帧不落盘）/
-              外部播放器 */}
+          {/* 0.3.0 需求1 / 0.3.3 需求3 / 0.3.7 需求3 / 0.3.8 需求2：H.264/H.265
+              播放四档——系统解码器（默认）/ ffmpeg 转码 /
+              ffmpeg 解码+原生渲染（批量连续解码不落盘）/ 外部播放器 */}
           <div className="field">
             <label>视频播放（H.264 / H.265）</label>
             <div className="radio-row">
@@ -475,7 +518,7 @@ export default function Settings(p: Props) {
                   checked={cfg.ui.videoDecoder === "render"}
                   onChange={() => uiSet({ videoDecoder: "render" })}
                 />
-                ffmpeg 解码+原生渲染（窗口内逐帧）
+                ffmpeg 解码+原生渲染（窗口内批量解码）
               </label>
               <label className="radio-item">
                 <input
@@ -496,8 +539,10 @@ export default function Settings(p: Props) {
               H.265 需「HEVC 视频扩展」/gstreamer HEVC 插件才可能直接播出）。
               ffmpeg 转码档 = 凡无法直接解码的视频一律先转 H.264 MP4 再窗口内播放（产物入媒体缓存、
               同一文件只转一次之后秒开，首次大文件耗 CPU）。
-              <b>ffmpeg 解码+原生渲染档（0.3.7 新增）</b> = 不生成整段转码产物：按需逐帧解码上屏
-              （帧率随 CPU 约 2–4 fps，音轨单独提取用于对时，无音轨自动静音；不含字幕轨），
+              <b>ffmpeg 解码+原生渲染档（0.3.7 新增；0.3.8 提速）</b> = 不生成整段转码产物：
+              <b>批量连续解码</b>上屏（一次进程顺序解出约 1.5 秒帧序列、按源帧率节拍播放——
+              取代 0.3.7 逐帧起进程的 2–4 fps；1080p 软解通常可达 25–30 fps，CPU 慢时自动丢帧
+              追赶不积压；音轨单独提取用于对时，无音轨自动静音；不含字幕轨），
               适合"立刻要看、不想等整段转码"的场景；与转码档共用上方 ffmpeg 路径。
             </p>
             {cfg.ui.videoDecoder === "external" && (
@@ -611,9 +656,45 @@ export default function Settings(p: Props) {
               onChange={(e) => cacheSet({ maxMemMb: Math.max(64, Number(e.target.value) || 2048) })}
             />
           </div>
+
+          {/* 0.3.8 需求5：缓存目录——显示/切换（可携迁移）/恢复默认 */}
+          <div className="field">
+            <label>缓存目录（媒体/缩略图落盘位置）</label>
+            <div className="row-actions" style={{ alignItems: "center", flexWrap: "wrap" }}>
+              <code className="dim" style={{ maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={dirInfo?.dir}>
+                {dirInfo?.dir ?? "读取中…"}
+                {dirInfo && !dirInfo.isDefault ? "（自定义）" : "（默认）"}
+              </code>
+              <button
+                className="btn small"
+                disabled={dirBusy}
+                title="选择新的缓存目录（可迁移既有缓存）"
+                onClick={() => {
+                  void (async () => {
+                    const picked = await open({ directory: true, title: "选择媒体/缩略图缓存目录" });
+                    if (typeof picked === "string" && picked.trim()) void switchCacheDir(picked.trim());
+                  })();
+                }}
+              >
+                切换目录…
+              </button>
+              {dirInfo && !dirInfo.isDefault && (
+                <button className="btn small" disabled={dirBusy} onClick={() => void switchCacheDir(null)} title={`恢复为 ${dirInfo.defaultDir}`}>
+                  恢复默认目录
+                </button>
+              )}
+              <label className="dim" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <input type="checkbox" checked={migrateDir} onChange={(e) => setMigrateDir(e.target.checked)} />
+                迁移既有缓存到新目录
+              </label>
+            </div>
+          </div>
+          {dirMsg && <p className="dim tip">{dirMsg}</p>}
+          {dirErr && <p className="error-bar">{dirErr}</p>}
+
           <p className="dim tip">
             缓存内容：网格缩略图、图片/视频预览与查看落盘（跨程序退出保留，超限按最久未访问自动淘汰；
-            本地模式的链接条目不会移动/删除你的源文件）。
+            本地模式的链接条目不会移动/删除你的源文件——迁移只搬运缓存自有条目）。
             {cacheStats && (
               <>
                 {" "}

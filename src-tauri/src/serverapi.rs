@@ -870,7 +870,19 @@ async fn create_session(
             "baseHash": base_hash.clone().unwrap_or_default(),
         })),
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        // 0.3.8：配 ≤0.2.7 服务端时大文件必现 413（旧默认 maxUploadBytes=2GiB
+        // 硬上限）——原样透传是英文技术串，改写为可操作的中文指引；
+        // 配 Server 0.2.8（默认不限）本分支天然不再触发。
+        if e.contains("exceeds maxUploadBytes") {
+            format!(
+                "上传被服务端拒绝：文件超过服务端上传大小上限（maxUploadBytes，Server ≤0.2.7 默认 2GiB）。请升级到 Server 0.2.8（默认已不限），或由管理员在服务端配置中调大/置 0 解除限额（{e}）"
+            )
+        } else {
+            e
+        }
+    })?;
     let session_id = sess
         .get("sessionId")
         .and_then(|v| v.as_str())

@@ -116,6 +116,7 @@ export default function FileView(p: Props) {
     setSel(new Set());
     setQ("");
     setKindFilter("");
+    setBulk(false); // 0.3.8：换目录/换来源退出批量模式（批量是显式动作）
   }, [p.path, p.rootName, p.isServer]);
 
   // key→entry 索引（entries 变化即刷新；调度循环据此取条目）
@@ -323,10 +324,18 @@ export default function FileView(p: Props) {
   // 复用 selEntries，无需改动 App 层操作实现。anchorRef 记录最近一次"非范围"选中
   // 的条目下标（Shift 以它为起点）。
   const anchorRef = useRef<number>(-1);
+  // 0.3.8 需求4：批量操作**不再默认开启**——复选框列/Ctrl+A/Shift 范围选/
+  // "已选 N 项"状态条全部由工具栏 [批量操作] 按钮进出；默认态单击=单选
+  // （重命名/复制/移动/删除等单文件操作路径不变）。退出批量模式即清空选择。
+  const [bulk, setBulk] = useState(false);
   const selectAll = () => setSel(new Set(filtered.map((e) => e.path)));
   const clearSel = () => {
     setSel(new Set());
     anchorRef.current = -1;
+  };
+  const toggleBulk = () => {
+    if (bulk) clearSel();
+    setBulk(!bulk);
   };
   const toggleOne = (e: FsEntry) =>
     setSel((prev) => {
@@ -365,10 +374,11 @@ export default function FileView(p: Props) {
     headCbRef.current.indeterminate = s > 0 && s < n;
   }, [sel, filtered]);
 
-  // Ctrl/Cmd+A 全选（仅当焦点不在输入框——避免抢走文本框全选）
+  // Ctrl/Cmd+A 全选（仅批量模式内生效——0.3.8 需求4；且焦点不在输入框）
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       if (!(ev.ctrlKey || ev.metaKey) || ev.key.toLowerCase() !== "a") return;
+      if (!bulk) return;
       const t = ev.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (document.querySelector(".modal-mask, .ctx-menu, .viewer")) return;
@@ -378,7 +388,7 @@ export default function FileView(p: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtered]);
+  }, [filtered, bulk]);
 
   const crumbs = dirParts(p.path);
   const readOnly = p.anonymous;
@@ -433,16 +443,18 @@ export default function FileView(p: Props) {
     <table className="table" onClick={(ev) => ev.stopPropagation()}>
       <thead>
         <tr>
-          {/* 0.3.7 需求5：复选框列——表头三态全选/清空 */}
-          <th style={{ width: 30 }}>
-            <input
-              ref={headCbRef}
-              type="checkbox"
-              className="row-check"
-              title="全选/清空本列筛选结果"
-              onChange={() => (headCbRef.current?.checked ? selectAll() : clearSel())}
-            />
-          </th>
+          {/* 0.3.7 需求5 复选框列（0.3.8 需求5…需求4 改版：仅批量模式显示） */}
+          {bulk && (
+            <th style={{ width: 30 }}>
+              <input
+                ref={headCbRef}
+                type="checkbox"
+                className="row-check"
+                title="全选/清空本列筛选结果"
+                onChange={() => (headCbRef.current?.checked ? selectAll() : clearSel())}
+              />
+            </th>
+          )}
           <th style={{ width: "40%" }}>名称</th>
           <th>大小</th>
           <th>修改时间</th>
@@ -454,7 +466,7 @@ export default function FileView(p: Props) {
           <tr
             key={e.path}
             className={sel.has(e.path) ? "row selected" : "row"}
-            onClick={(ev) => toggle(e, ev.ctrlKey || ev.metaKey, ev.shiftKey)}
+            onClick={(ev) => toggle(e, bulk && (ev.ctrlKey || ev.metaKey), bulk && ev.shiftKey)}
             onDoubleClick={() => p.onOpen(e)}
             onContextMenu={(ev) => {
               if (!p.onCtxEntry) return;
@@ -462,23 +474,27 @@ export default function FileView(p: Props) {
               p.onCtxEntry(e, ev.clientX, ev.clientY);
             }}
             title={
-              e.isDir
-                ? "双击打开；单击选择，Shift+单击范围选，Ctrl+单击加选；右键菜单"
+              (e.isDir
+                ? "双击打开；单击选择"
                 : viewableType(e)
-                  ? "双击查看；单击选择，Shift+单击范围选，Ctrl+单击加选；右键菜单"
-                  : "双击预览；单击选择，Shift+单击范围选，Ctrl+单击加选；右键菜单"
+                  ? "双击查看；单击选择"
+                  : "双击预览；单击选择") +
+              (bulk ? "，Shift+单击范围选，Ctrl+单击加选" : "（点［批量操作］进入多选）") +
+              "；右键菜单"
             }
           >
-            <td>
-              <input
-                type="checkbox"
-                className="row-check"
-                checked={sel.has(e.path)}
-                onClick={(ev) => ev.stopPropagation()}
-                onChange={() => toggleOne(e)}
-                title="勾选加入批量选择"
-              />
-            </td>
+            {bulk && (
+              <td>
+                <input
+                  type="checkbox"
+                  className="row-check"
+                  checked={sel.has(e.path)}
+                  onClick={(ev) => ev.stopPropagation()}
+                  onChange={() => toggleOne(e)}
+                  title="勾选加入批量选择"
+                />
+              </td>
+            )}
             <td className="cell-name">
               <span className={`ficon k-${e.kind}`}>{kindIcon(e.kind)}</span>
               <span className="fname">{e.name}</span>
@@ -533,8 +549,15 @@ export default function FileView(p: Props) {
         <button className="btn" disabled={readOnly || !selEntries.length} title={roTip} onClick={() => p.onCopyMove(selEntries, "move")}>
           <IconMove size={15} /> 移动
         </button>
-        {/* 0.3.7 需求5：批量选择状态条——选中数一目了然，可整体取消 */}
-        {selEntries.length > 0 && (
+        {/* 0.3.8 需求4：批量操作显式开关 + 状态条（仅批量模式） */}
+        <button
+          className={bulk ? "btn small primary" : "btn small"}
+          title={bulk ? "退出批量操作（清空选择）" : "进入批量操作：复选框多选、Shift 范围选、Ctrl+A 全选"}
+          onClick={toggleBulk}
+        >
+          <IconLayers size={13} /> {bulk ? "退出批量" : "批量操作"}
+        </button>
+        {bulk && selEntries.length > 0 && (
           <span className="sel-count">
             已选 <b>{selEntries.length}</b> 项
             <button className="btn small" title="Ctrl+A 全选筛选结果" onClick={selectAll}>
@@ -640,6 +663,7 @@ export default function FileView(p: Props) {
                     sel={sel}
                     thumbs={thumbs}
                     tkeyOf={thumbKeyOf}
+                    bulk={bulk}
                     onToggle={toggle}
                     onOpen={p.onOpen}
                     onPreview={p.onPreview}
@@ -658,6 +682,7 @@ export default function FileView(p: Props) {
               sel={sel}
               thumbs={thumbs}
               tkeyOf={thumbKeyOf}
+              bulk={bulk}
               onToggle={toggle}
               onOpen={p.onOpen}
               onPreview={p.onPreview}

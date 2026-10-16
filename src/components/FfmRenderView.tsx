@@ -1,12 +1,12 @@
-// 0.3.7 需求3 第 4 档「ffmpeg 解码 + 原生渲染」播放器：
-// 视频帧由用户配置的 ffmpeg **按需逐帧解码**（`ffmpeg_frame`：`-ss` 定位 + 单帧
-// mjpeg 管道，不落盘产物），前端画布上屏；音轨单独一次性抽取（`ffmpeg_audio_track`
-// → `<key>.audio.m4a` 入媒体缓存）用 <audio> 驱动时钟与对时——与「ffmpeg 转码」档的
-// 本质区别是：不生成整文件 H.264 产物、边解边播、无等待整段转码。
-// 有意的能力边界（面板如实声明）：帧率受逐帧解码 CPU 开销限制（约 2–4 fps，
-// 定位"能看能听可控"而非流畅高帧）；不渲染字幕轨。
+// 0.3.7 需求3 第 4 档「ffmpeg 解码 + 原生渲染」播放器；0.3.8 需求2 提速改版：
+// 帧由 `ffmpeg_frames` **批量连续解码**供给（一次进程解出 ~1.5 秒的帧序列，
+// 顺序解码免逐帧起进程/逐帧 seek），前端按源帧率节拍上屏——帧率从 0.3.7 的
+// 2–4fps 提升到接近源帧率（1080p 软解 30fps 量级）。音轨仍一次性抽取
+// （`ffmpeg_audio_track` → `<key>.audio.m4a` 入媒体缓存）用 <audio> 驱动时钟
+// 与对时；与「ffmpeg 转码」档的本质区别不变：不生成整文件产物、边解边播。
+// 有意的能力边界（面板如实声明）：帧率受 CPU 解码速度限制（快则源帧率、慢则
+// 丢帧追赶，不积压）；音画对齐精度 ±0.5s 量级；不渲染字幕轨。
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import * as api from "../lib/api";
 
 interface Props {
@@ -24,8 +24,13 @@ function fmtClock(s: number): string {
   return h > 0 ? `${h}:${p(min)}:${p(sec)}` : `${p(min)}:${p(sec)}`;
 }
 
+interface QueuedFrame {
+  bytes: ArrayBuffer;
+  t: number;
+}
+
 export default function FfmRenderView(p: Props) {
-  const [info, setInfo] = useState<{ codec: string; duration: number; audio: boolean } | null>(null);
+  const [info, setInfo] = useState<api.VideoMediaInfo | null>(null);
   const [audioUrl, setAudioUrl] = useState("");
   const [hint, setHint] = useState(""); // 无音轨/提取失败 → 静音内部时钟
   const [err, setErr] = useState("");
@@ -33,21 +38,37 @@ export default function FfmRenderView(p: Props) {
   const [t, setT] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  // 单飞取帧：进行中记录"最新想要的时间"，完成即跳播到最新（拖拽不堆积请求）
-  const flight = useRef({ busy: false, want: -1 });
-  const clockRef = useRef<number | null>(null); // 无音轨内部时钟（setInterval 句柄）
-  const tRef = useRef(0); // 时钟权威读数（state 仅驱动渲染）
+
+  // —— 0.3.8 批量解码渲染引擎 ——
+  const qRef = useRef<QueuedFrame[]>([]); // 已解码待上屏帧（时间升序）
+  const reqRef = useRef({ busy: false, want: null as number | null }); // 批量取帧单飞
+  const endedRef = useRef(false); // 末尾无更多帧（停发请求，seek 复位）
+  const fpsRef = useRef(30); // 解码/节拍帧率（源 fps 夹 0.5..60，未知按 30）
+  const genRef = useRef(0); // 文件代际：换文件/卸载作废全部在飞回调
+  const tRef = useRef(0); // 静音模式内部时钟读数
+  const playingRef = useRef(false);
+  const audioUrlRef = useRef("");
+  const durRef = useRef(0);
+  const drawSeqRef = useRef(0); // 只画"最新一帧"，慢解码的旧帧就地丢弃
+  playingRef.current = playing;
+  audioUrlRef.current = audioUrl;
 
   // 换文件复位
   useEffect(() => {
+    genRef.current++;
+    qRef.current = [];
+    reqRef.current = { busy: false, want: null };
+    endedRef.current = false;
+    tRef.current = 0;
     setInfo(null);
     setAudioUrl("");
     setHint("");
     setErr("");
     setPlaying(false);
     setT(0);
-    tRef.current = 0;
-    flight.current = { busy: false, want: -1 };
+    return () => {
+      genRef.current++; // 卸载：在飞批量/绘帧回调全部作废
+    };
   }, [p.mediaPath]);
 
   // 媒体信息 + 音轨抽取
@@ -58,11 +79,14 @@ export default function FfmRenderView(p: Props) {
         const m = await api.videoMediaInfo(p.mediaPath);
         if (cancelled) return;
         setInfo(m);
+        durRef.current = m.duration;
+        const f = m.fps && m.fps > 0 && m.fps <= 60 ? m.fps : 30;
+        fpsRef.current = Math.max(0.5, Math.min(60, f));
         if (m.audio) {
           try {
             const track = await api.ffmpegAudioTrack(p.mediaPath);
-            if (!cancelled) setAudioUrl(convertFileSrc(track));
-          } catch (ex) {
+            if (!cancelled) setAudioUrl(api.mediaUrl(track));
+          } catch {
             if (!cancelled) setHint("音轨提取不可用，静音播放（逐帧解码不受影响）");
           }
         } else {
@@ -77,19 +101,15 @@ export default function FfmRenderView(p: Props) {
     };
   }, [p.mediaPath]);
 
-  // 解帧并上屏（单飞 + 跳播最新）
-  async function pump(time: number) {
-    const f = flight.current;
-    if (f.busy) {
-      f.want = time; // 覆盖为最新请求
-      return;
-    }
-    f.busy = true;
-    let cur = time;
-    try {
-      for (;;) {
-        const buf = await api.ffmpegFrameBytes(p.mediaPath, cur);
-        const bmp = await createImageBitmap(new Blob([buf], { type: "image/jpeg" }));
+  // 只画"最新发起"的帧：解码排队时旧帧自动作废，绝不越拖越远
+  function showFrame(bytes: ArrayBuffer, gen: number) {
+    const my = ++drawSeqRef.current;
+    void createImageBitmap(new Blob([bytes], { type: "image/jpeg" }))
+      .then((bmp) => {
+        if (my !== drawSeqRef.current || gen !== genRef.current) {
+          bmp.close();
+          return;
+        }
         const cv = canvasRef.current;
         if (cv) {
           if (cv.width !== bmp.width || cv.height !== bmp.height) {
@@ -99,77 +119,123 @@ export default function FfmRenderView(p: Props) {
           cv.getContext("2d")?.drawImage(bmp, 0, 0);
         }
         bmp.close();
-        if (f.want < 0 || Math.abs(f.want - cur) < 0.2) break;
-        cur = f.want;
-        f.want = -1;
+      })
+      .catch(() => undefined);
+  }
+
+  // 批量取帧（单飞：进行中记录最新 want，完成即续取；末尾/取消静默）
+  async function pumpBatch() {
+    const r = reqRef.current;
+    if (r.busy) return;
+    const at = r.want;
+    if (at == null || endedRef.current) return;
+    r.want = null;
+    r.busy = true;
+    const gen = genRef.current;
+    const fps = fpsRef.current;
+    const n = Math.max(10, Math.round(fps * 1.5));
+    try {
+      const frames = await api.ffmpegFramesBatch(p.mediaPath, at, n, fps, 720);
+      if (gen !== genRef.current) return;
+      if (r.want == null) {
+        // 无更新的 seek 请求：按序入队；时间戳取"请求时刻 + i/fps"近似
+        for (let i = 0; i < frames.length; i++) {
+          qRef.current.push({ bytes: frames[i], t: at + i / fps });
+        }
       }
     } catch (ex) {
-      setErr(String(ex));
+      const m = String(ex);
+      if (/已到末尾|无输出帧/.test(m)) {
+        endedRef.current = true; // 播到结尾：停止补帧直到 seek
+      } else if (gen === genRef.current) {
+        setErr(m);
+      }
     } finally {
-      f.busy = false;
-      f.want = -1;
+      r.busy = false;
+      if (r.want != null && gen === genRef.current) void pumpBatch();
     }
   }
 
-  // 首帧海报（就绪即解码 0 秒）
-  useEffect(() => {
-    if (info && !err) void pump(0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [info]);
+  // 从新位置重新解码（清队续取）
+  function restartAt(time: number) {
+    qRef.current = [];
+    endedRef.current = false;
+    reqRef.current.want = time;
+    void pumpBatch();
+  }
 
-  // 有音轨：audio 时钟驱动（timeupdate 约 4Hz——逐帧档定位"可控"非高帧率）
+  // 渲染主循环：rAF 节拍（audio 时钟优先，无音轨走内部时钟）
   useEffect(() => {
-    const a = audioRef.current;
-    if (!a || !audioUrl) return;
-    const onTick = () => {
-      const now = a.currentTime;
-      tRef.current = now;
-      setT(now);
-      if (!a.paused) void pump(now);
-    };
-    a.addEventListener("timeupdate", onTick);
-    return () => a.removeEventListener("timeupdate", onTick);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioUrl]);
-
-  // 无音轨：内部 500ms 时钟推进
-  useEffect(() => {
-    if (audioUrl) return;
-    if (!playing) {
-      if (clockRef.current) {
-        window.clearInterval(clockRef.current);
-        clockRef.current = null;
+    if (!info || err) return;
+    const gen = genRef.current;
+    let raf = 0;
+    let lastWall = performance.now();
+    const step = () => {
+      raf = requestAnimationFrame(step);
+      if (gen !== genRef.current) return;
+      const a = audioRef.current;
+      const audio = audioUrlRef.current && a;
+      const now = performance.now();
+      if (!audio && playingRef.current) {
+        tRef.current += (now - lastWall) / 1000;
       }
-      return;
-    }
-    clockRef.current = window.setInterval(() => {
-      const dur = info?.duration ?? 0;
-      let nt = tRef.current + 0.5;
-      if (dur > 0 && nt >= dur) {
-        nt = dur;
+      lastWall = now;
+      const pos = audio ? a.currentTime : Math.min(tRef.current, durRef.current > 0 ? durRef.current : tRef.current);
+      setT(pos);
+      // 静音模式自然到终点：停表
+      if (!audio && playingRef.current && durRef.current > 0 && tRef.current >= durRef.current - 0.05) {
         setPlaying(false);
       }
-      tRef.current = nt;
-      setT(nt);
-      void pump(nt);
-    }, 500);
-    return () => {
-      if (clockRef.current) {
-        window.clearInterval(clockRef.current);
-        clockRef.current = null;
+      if (!playingRef.current) return;
+      const dt = 1 / fpsRef.current;
+      const q = qRef.current;
+      // 音画漂移过大（解码被 CPU 挤停/系统睡眠后唤醒）：直接以音轨时钟重启解码
+      if (audio && q.length > 2 && (q[0].t > pos + 2.5 || q[q.length - 1].t < pos - 2.5)) {
+        restartAt(pos);
+        return;
+      }
+      // 追帧：丢弃已过时帧、只画最新的一帧（不积压）
+      let latest: QueuedFrame | null = null;
+      while (q.length && q[0].t <= pos + dt * 0.6) {
+        latest = q.shift() ?? null;
+      }
+      if (latest) showFrame(latest.bytes, gen);
+      // 预取补队：队尾不足 0.9 秒覆盖且无在飞批量时
+      const tailT = q.length ? q[q.length - 1].t : pos - 1;
+      if (tailT < pos + 0.9 && reqRef.current.want == null) {
+        restartIfNeeded(q.length ? q[q.length - 1].t + dt : pos);
       }
     };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, audioUrl, info]);
+  }, [info, err]);
+
+  // 续取（队尾接应）：有在飞批量则记 want，完成即续
+  function restartIfNeeded(time: number) {
+    const r = reqRef.current;
+    if (r.busy) {
+      r.want = time;
+      return;
+    }
+    r.want = time;
+    void pumpBatch();
+  }
+
+  // 首帧海报：信息就绪即解 0 秒
+  useEffect(() => {
+    if (info && !err) restartAt(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [info]);
 
   const togglePlay = () => {
     if (!info) return;
     const next = !playing;
     setPlaying(next);
-    if (audioUrl && audioRef.current) {
+    if (audioUrlRef.current && audioRef.current) {
       if (next) {
-        if (info.duration > 0 && audioRef.current.currentTime >= info.duration - 0.3) seekTo(0, next);
-        void audioRef.current.play().catch(() => undefined);
+        if (info.duration > 0 && audioRef.current.currentTime >= info.duration - 0.3) seekTo(0, true);
+        else void audioRef.current.play().catch(() => undefined);
       } else audioRef.current.pause();
     }
   };
@@ -184,7 +250,7 @@ export default function FfmRenderView(p: Props) {
         /* 元数据未就绪时忽略，帧照常显示 */
       }
     }
-    void pump(v);
+    restartAt(v);
     if (autoplay && !playing) setPlaying(true);
   };
 
@@ -229,7 +295,8 @@ export default function FfmRenderView(p: Props) {
         </button>
       </div>
       <div className="dim tip">
-        ffmpeg 逐帧解码 + 原生渲染：帧不落盘、边解边播（帧率随 CPU 约 2–4 fps，不含字幕轨）
+        ffmpeg 批量连续解码 + 原生渲染：帧不落盘、边解边播（节拍≈源帧率 {info && info.fps ? `${Math.round(info.fps)}fps` : ""}，
+        CPU 慢时自适应丢帧追赶不积压，音画对齐 ±0.5s，不含字幕轨）
         {hint ? ` · ${hint}` : ""}
         {info?.codec ? ` · 源编码 ${info.codec}` : ""}
       </div>

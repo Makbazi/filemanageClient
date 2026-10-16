@@ -155,6 +155,9 @@ struct VideoInfo {
     duration: f64,
     /// 是否有音轨
     audio: bool,
+    /// 标称帧率（`-i` 报告的 "NN.NN fps"）；0=未知——0.3.8 渲染档批量解码
+    /// 的节拍与批量长度由此决定（未知按 30 处理）
+    fps: f64,
 }
 
 fn info_cache() -> &'static Mutex<HashMap<String, VideoInfo>> {
@@ -196,6 +199,21 @@ fn parse_ffmpeg_report(text: &str) -> VideoInfo {
         }
     }
     info.audio = text.contains("Audio:");
+    // 0.3.8（渲染档节拍）：视频行内 "NN.NN fps" 标称帧率（VFR 取报告值即可）
+    if let Some(vpos) = text.find("Video:") {
+        let vline_end = text[vpos..].find('\n').map(|i| vpos + i).unwrap_or(text.len());
+        let vt: Vec<&str> = text[vpos..vline_end].split_whitespace().collect();
+        for (idx, t) in vt.iter().enumerate() {
+            if t.starts_with("fps") && idx > 0 {
+                if let Ok(f) = vt[idx - 1].parse::<f64>() {
+                    if f > 0.0 && f <= 240.0 {
+                        info.fps = f;
+                        break;
+                    }
+                }
+            }
+        }
+    }
     info
 }
 
@@ -209,7 +227,8 @@ async fn probe_video_info(st: &config::AppState, src: &str) -> VideoInfo {
     }
     let bin = ffmpeg_bin(st);
     let mut c = TokioCommand::new(&bin);
-    c.args(["-hide_banner", "-i", src]);
+    c.args(["-hide_banner", "-i", src])
+        .stdin(std::process::Stdio::null());
     no_window(&mut c);
     let info = match c.output().await {
         Ok(out) => parse_ffmpeg_report(&String::from_utf8_lossy(&out.stderr)),
@@ -237,6 +256,7 @@ pub async fn video_media_info(app: AppHandle, path: String) -> Result<serde_json
         "codec": info.codec,
         "duration": info.duration,
         "audio": info.audio,
+        "fps": info.fps,
     }))
 }
 
@@ -343,6 +363,12 @@ async fn transcode_run(
     let _ = tokio::fs::remove_file(part).await;
 
     let mut c = TokioCommand::new(&bin);
+    // 0.3.8（并发转码治理）：libx264 默认吃满全部核心——A 转码中打开 B，B 的
+    // 转码/探测会被 CPU 挤占成"疑似不可用"（进度长时间 0%）。按在飞作业数分摊
+    // 线程配额：单个作业时全速独占，多作业并发时均分核心，保证每个都在推进。
+    let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let active = ffmpeg_jobs().lock().unwrap().len().max(1); // 含本作业（刚注册）
+    let threads = (ncpu / active).clamp(1, ncpu).to_string();
     c.args([
         "-hide_banner",
         "-loglevel",
@@ -369,9 +395,13 @@ async fn transcode_run(
         "-f",
         "mp4",
     ])
+    .args(["-threads", &threads])
     .arg(part)
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
+    // stdin 必须封闭：ffmpeg 检测到可交互 stdin 会挂键盘监听线程，从 GUI 进程
+    // 派生时该句柄形态不定——显式 null 杜绝偶发挂起（0.3.8）。
+    .stdin(std::process::Stdio::null())
     // 关键（0.3.7 需求1）：任务 future 被丢弃（应用退出/异常拆栈）即杀子进程——
     // tokio 默认 kill_on_drop=false 会让 ffmpeg 跨会话续写产物，正是"关闭重开误报
     // ffmpeg 不可用"的孤儿进程根因。
@@ -446,8 +476,10 @@ async fn transcode_run(
                 }
             }
             _ = &mut cancel_wait => {
-                let job2 = ffmpeg_jobs().lock().unwrap().get(key).cloned();
-                if job2.map(|j| j.cancel.load(Ordering::SeqCst)).unwrap_or(true) {
+                // 0.3.8：直接读**本作业**的取消标志，不再按 key 回查注册表——
+                // 注册表条目可能已被同 key 的新一代作业替换（关窗秒重开场景），
+                // 回查会读到新作业的 false 而漏杀，旧 ffmpeg 后台续写互踩产物。
+                if job.cancel.load(Ordering::SeqCst) {
                     let _ = child.start_kill();
                     cancelled = true;
                 }
@@ -460,7 +492,13 @@ async fn transcode_run(
         cancelled = true;
     }
     let status = child.wait().await;
-    ffmpeg_jobs().lock().unwrap().remove(key);
+    // 只摘自己的注册条目（同 key 新一代作业可能已覆盖注册，不可误删——0.3.8）
+    {
+        let mut m = ffmpeg_jobs().lock().unwrap();
+        if m.get(key).map(|j| Arc::ptr_eq(j, &job)).unwrap_or(false) {
+            m.remove(key);
+        }
+    }
 
     if cancelled {
         let _ = tokio::fs::remove_file(part).await;
@@ -635,6 +673,7 @@ pub async fn ffmpeg_frame(
     .arg("pipe:1")
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
+    .stdin(std::process::Stdio::null())
     .kill_on_drop(true);
     no_window(&mut c);
     let out = c.output().await.map_err(|e| {
@@ -662,6 +701,116 @@ pub async fn ffmpeg_frame(
         map.insert(ck, bytes.clone());
     }
     Ok(tauri::ipc::Response::new(bytes.as_ref().clone()))
+}
+
+/// 从 image2pipe 连续 mjpeg 输出中切帧（FFD8…FFD9 扫描）。截断尾（进程被杀/
+/// 输出不全）保留已完整的帧，不报错。
+fn split_jpegs(buf: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 1 < buf.len() {
+        if buf[i] == 0xFF && buf[i + 1] == 0xD8 {
+            let mut j = i + 2;
+            while j + 1 < buf.len() {
+                if buf[j] == 0xFF && buf[j + 1] == 0xD9 {
+                    break;
+                }
+                j += 1;
+            }
+            if j + 1 < buf.len() {
+                out.push(buf[i..j + 2].to_vec());
+                i = j + 2;
+                continue;
+            }
+            break;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// 批量连续解码（0.3.8 需求2 渲染档提速主通道）：一次 ffmpeg 进程解出从 `time`
+/// 起的 `count` 帧（`fps` 重采样到目标节拍 + 缩放 ≤maxh），经 image2pipe 管道
+/// 输出、按 JPEG SOI/EOI 切帧。返回体 = 逐帧 `[u32 LE 长度][jpeg 字节]` 串接，
+/// 前端 DataView 切分。
+/// 与 0.3.7 `ffmpeg_frame` 逐帧起进程（每帧 seek+解码 0.3~1s → 2–4fps）的本质
+/// 区别：**一次定位、顺序连续解码**——HEVC 软解 1080p 单进程轻松跑到 60fps+，
+/// 批量 40 帧 ≈ 1 秒出头，渲染档播放节拍由前端按 fps 拉取，可到源帧率。
+/// 仍不落盘、零 fm-transfer；`kill_on_drop` 同纪律。
+#[tauri::command]
+pub async fn ffmpeg_frames(
+    app: AppHandle,
+    path: String,
+    time: f64,
+    count: Option<u32>,
+    fps: Option<f64>,
+    maxh: Option<u32>,
+) -> Result<tauri::ipc::Response, String> {
+    let st = config::state(&app);
+    let src = guarded_cache_path(&st, &path)?;
+    let n = count.unwrap_or(40).clamp(1, 300);
+    let f = fps.unwrap_or(0.0);
+    let f = if f.is_finite() && (0.5..=60.0).contains(&f) { f } else { 30.0 };
+    let maxh = maxh.unwrap_or(540).clamp(120, 1080);
+    let t = if time.is_finite() { time.max(0.0) } else { 0.0 };
+    let bin = ffmpeg_bin(&st);
+    let mut c = TokioCommand::new(&bin);
+    let tss = format!("{t:.3}");
+    let fpsv = format!("{f:.4}");
+    let vf = format!("fps=fps={fpsv}:round=near,scale=w=-2:h='min({maxh},ih)'");
+    let frames = n.to_string();
+    c.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        &tss,
+        "-i",
+        &src,
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        &frames,
+        "-an",
+        "-vf",
+        &vf,
+        "-c:v",
+        "mjpeg",
+        "-q:v",
+        "7",
+        "-f",
+        "image2pipe",
+    ])
+    .arg("pipe:1")
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .stdin(std::process::Stdio::null())
+    .kill_on_drop(true);
+    no_window(&mut c);
+    let out = c.output().await.map_err(|e| {
+        format!("ffmpeg 启动失败（{bin}）：{e}——请在「设置→外观→视频播放」检查 ffmpeg 路径")
+    })?;
+    if !out.status.success() {
+        let full = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let err: String = if full.chars().count() > 200 {
+            let nch = full.chars().count() - 200;
+            full.chars().skip(nch).collect()
+        } else {
+            full
+        };
+        return Err(format!("批量解码失败: {err}"));
+    }
+    let jpegs = split_jpegs(&out.stdout);
+    if jpegs.is_empty() {
+        return Err("批量解码无输出帧（源文件可能损坏或已到末尾）".into());
+    }
+    let total: usize = jpegs.iter().map(|j| j.len() + 4).sum();
+    let mut body: Vec<u8> = Vec::with_capacity(total);
+    for j in &jpegs {
+        body.extend_from_slice(&(j.len() as u32).to_le_bytes());
+        body.extend_from_slice(j);
+    }
+    Ok(tauri::ipc::Response::new(body))
 }
 
 /// 抽取音轨为 `<key>.audio.m4a`（渲染档对时通道）：aac、faststart、`.part` 暂存
@@ -716,6 +865,7 @@ pub async fn ffmpeg_audio_track(app: AppHandle, path: String) -> Result<String, 
         "mp4",
     ])
     .arg(&part)
+    .stdin(std::process::Stdio::null())
     .kill_on_drop(true);
     no_window(&mut c);
     let status = c
