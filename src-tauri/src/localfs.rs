@@ -842,6 +842,9 @@ pub(crate) fn media_cache_path(
     if dest.exists() {
         // 本地模式条目可能是 hard_link（与用户源文件同 inode）——绝不 touch
         // 其 mtime（会污染源文件；淘汰按创建序，unlink 只断链接不伤源数据）。
+        // 0.3.9：命中交付即 pin（在服保护——旧 mtime 硬链条目不保护会在下一次
+        // 超限淘汰中"刚交付即被删"，ffmpeg 档误报"转码播放不可用/文件不可访问"）。
+        crate::cachemgr::pin(&dest);
         return Ok(dest);
     }
     if raw {
@@ -854,9 +857,13 @@ pub(crate) fn media_cache_path(
             .ok_or("该 RAW 未找到完整内嵌 JPEG 预览，请下载后用 RAW 软件查看")?;
         fs::write(&dest, &jpeg).map_err(|e| e.to_string())?;
         crate::cachemgr::note_new_file(jpeg.len() as u64);
+        crate::cachemgr::pin(&dest);
         crate::cachemgr::maybe_enforce(st);
         return Ok(dest);
     }
+    // 0.3.9：先腾空间再建条目（超限淘汰优先清旧的，不让刚建好的条目在
+    // 建后 enforce 中因"最老 mtime"首当其冲），建后 pin 兜底。
+    crate::cachemgr::maybe_enforce(st);
     let linked = fs::hard_link(&abs, &dest);
     if linked.is_err() {
         fs::copy(&abs, &dest).map_err(|e| e.to_string())?;
@@ -864,6 +871,7 @@ pub(crate) fn media_cache_path(
     if let Ok(m) = fs::metadata(&dest) {
         crate::cachemgr::note_new_file(m.len());
     }
+    crate::cachemgr::pin(&dest);
     crate::cachemgr::maybe_enforce(st);
     Ok(dest)
 }

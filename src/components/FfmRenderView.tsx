@@ -6,6 +6,13 @@
 // 与对时；与「ffmpeg 转码」档的本质区别不变：不生成整文件产物、边解边播。
 // 有意的能力边界（面板如实声明）：帧率受 CPU 解码速度限制（快则源帧率、慢则
 // 丢帧追赶，不积压）；音画对齐精度 ±0.5s 量级；不渲染字幕轨。
+// 0.3.9（修黑屏）：①绘帧从"drawSeq 只认最新发起"改为**串行单飞 + 最新待绘
+// 覆盖**——旧逻辑在 60fps 节拍（Windows 实测）下每张 createImageBitmap 还没
+// resolve 就被下一张作废，**全部帧被丢弃=画面恒黑而音频照常走到片尾**；串行
+// 方案保证解码慢时自动降上屏帧率但绝不一帧不画。②暂停态也绘制进度条 seek 后
+// 的首帧（海报帧，旧实现 play 前恒黑）。③t=0 首批"无输出帧"不再静默判"已到
+// 末尾"——改判错误可见（真到末尾的续批请求仍静默停批）。配套 Rust split_jpegs
+// 段链校验修复（表字节里的 FF D9 假边界不再产出半帧坏 JPEG）。
 import { useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
 
@@ -49,7 +56,10 @@ export default function FfmRenderView(p: Props) {
   const playingRef = useRef(false);
   const audioUrlRef = useRef("");
   const durRef = useRef(0);
-  const drawSeqRef = useRef(0); // 只画"最新一帧"，慢解码的旧帧就地丢弃
+  // 0.3.9 串行绘帧通道：busy=当前有一张在解码；pending=解码期间最新到的一帧
+  const drawBusyRef = useRef(false);
+  const pendingDrawRef = useRef<QueuedFrame | null>(null);
+  const hasDrawnRef = useRef(false); // 成功上屏过至少一帧
   playingRef.current = playing;
   audioUrlRef.current = audioUrl;
 
@@ -59,6 +69,9 @@ export default function FfmRenderView(p: Props) {
     qRef.current = [];
     reqRef.current = { busy: false, want: null };
     endedRef.current = false;
+    pendingDrawRef.current = null;
+    drawBusyRef.current = false; // 在飞 resolve 因 gen 失配走 drain()→释放 busy
+    hasDrawnRef.current = false;
     tRef.current = 0;
     setInfo(null);
     setAudioUrl("");
@@ -101,26 +114,46 @@ export default function FfmRenderView(p: Props) {
     };
   }, [p.mediaPath]);
 
-  // 只画"最新发起"的帧：解码排队时旧帧自动作废，绝不越拖越远
+  // 0.3.9（修黑屏①）：串行单飞绘帧——同一时刻只解一张 JPEG，解码期间到达的
+  // 更新帧进 pendingDrawRef（覆盖式，只留最新）；resolve 后画"当时最新的一张"。
+  // 旧 drawSeq 作废式在 60fps 节拍 + 解码 >16ms 时每一张都被后继作废→全黑。
   function showFrame(bytes: ArrayBuffer, gen: number) {
-    const my = ++drawSeqRef.current;
-    void createImageBitmap(new Blob([bytes], { type: "image/jpeg" }))
-      .then((bmp) => {
-        if (my !== drawSeqRef.current || gen !== genRef.current) {
-          bmp.close();
-          return;
-        }
-        const cv = canvasRef.current;
-        if (cv) {
-          if (cv.width !== bmp.width || cv.height !== bmp.height) {
-            cv.width = bmp.width;
-            cv.height = bmp.height;
+    if (gen !== genRef.current) return;
+    const frame = { bytes, t: 0 };
+    if (drawBusyRef.current) {
+      pendingDrawRef.current = frame;
+      return;
+    }
+    drawBusyRef.current = true;
+    const drain = () => {
+      const next = pendingDrawRef.current;
+      if (next && gen === genRef.current) {
+        pendingDrawRef.current = null;
+        paint(next);
+      } else {
+        pendingDrawRef.current = null;
+        drawBusyRef.current = false;
+      }
+    };
+    const paint = (f: QueuedFrame) => {
+      void createImageBitmap(new Blob([f.bytes], { type: "image/jpeg" }))
+        .then((bmp) => {
+          if (gen === genRef.current) {
+            const cv = canvasRef.current;
+            if (cv) {
+              if (cv.width !== bmp.width || cv.height !== bmp.height) {
+                cv.width = bmp.width;
+                cv.height = bmp.height;
+              }
+              cv.getContext("2d")?.drawImage(bmp, 0, 0);
+            }
           }
-          cv.getContext("2d")?.drawImage(bmp, 0, 0);
-        }
-        bmp.close();
-      })
-      .catch(() => undefined);
+          bmp.close();
+          drain();
+        })
+        .catch(() => drain());
+    };
+    paint(frame);
   }
 
   // 批量取帧（单飞：进行中记录最新 want，完成即续取；末尾/取消静默）
@@ -145,7 +178,10 @@ export default function FfmRenderView(p: Props) {
       }
     } catch (ex) {
       const m = String(ex);
-      if (/已到末尾|无输出帧/.test(m)) {
+      // 0.3.9（修黑屏③）："已到末尾/无输出帧"只在**确实往后播过**（seek 点
+      // >0.2s 或已成功上屏过帧）时才静默停批；起播首批就无帧=异常，必须可见
+      // 报错——旧逻辑把一切空输出吞成 ended，黑屏无声无息。
+      if (/已到末尾|无输出帧/.test(m) && (at > 0.2 || hasDrawnRef.current)) {
         endedRef.current = true; // 播到结尾：停止补帧直到 seek
       } else if (gen === genRef.current) {
         setErr(m);
@@ -186,21 +222,25 @@ export default function FfmRenderView(p: Props) {
       if (!audio && playingRef.current && durRef.current > 0 && tRef.current >= durRef.current - 0.05) {
         setPlaying(false);
       }
-      if (!playingRef.current) return;
       const dt = 1 / fpsRef.current;
       const q = qRef.current;
       // 音画漂移过大（解码被 CPU 挤停/系统睡眠后唤醒）：直接以音轨时钟重启解码
-      if (audio && q.length > 2 && (q[0].t > pos + 2.5 || q[q.length - 1].t < pos - 2.5)) {
+      if (playingRef.current && audio && q.length > 2 && (q[0].t > pos + 2.5 || q[q.length - 1].t < pos - 2.5)) {
         restartAt(pos);
         return;
       }
-      // 追帧：丢弃已过时帧、只画最新的一帧（不积压）
+      // 追帧：丢弃已过时帧、把最新的一张交给串行绘帧通道（0.3.9：暂停态也绘制
+      // ——seek 后先出海报帧；解码慢时自动降帧率，但不再"全帧作废恒黑屏"）
       let latest: QueuedFrame | null = null;
       while (q.length && q[0].t <= pos + dt * 0.6) {
         latest = q.shift() ?? null;
       }
-      if (latest) showFrame(latest.bytes, gen);
-      // 预取补队：队尾不足 0.9 秒覆盖且无在飞批量时
+      if (latest) {
+        hasDrawnRef.current = true;
+        showFrame(latest.bytes, gen);
+      }
+      // 预取补队（仅播放中）：队尾不足 0.9 秒覆盖且无在飞批量时
+      if (!playingRef.current) return;
       const tailT = q.length ? q[q.length - 1].t : pos - 1;
       if (tailT < pos + 0.9 && reqRef.current.want == null) {
         restartIfNeeded(q.length ? q[q.length - 1].t + dt : pos);

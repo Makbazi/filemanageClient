@@ -31,6 +31,7 @@ import VersionsDialog from "./components/VersionsDialog";
 import TransferPanel from "./components/TransferPanel";
 import ContextMenu, { type CtxItem } from "./components/ContextMenu";
 import UploadToDialog from "./components/UploadToDialog";
+import CopyMoveDialog from "./components/CopyMoveDialog";
 import { IconEye, IconUpload, IconExpand } from "./components/icons";
 import { Confirm, Modal, Prompt, UploadDiffDialog } from "./components/Modals";
 
@@ -39,7 +40,10 @@ type Dialog =
   | { kind: "confirm"; danger: boolean; title: string; lines: string[]; typed?: string; onOk(): void; onCancel?(): void }
   | { kind: "prompt"; title: string; label: string; initial: string; onOk(v: string): void }
   | { kind: "login"; serverId: string; from?: "settings" }
-  | { kind: "uploadTo"; entry: FsEntry }
+  // 0.3.9 需求5/6：上传目标选择对话框改收**多选条目数组**（单项=长度 1）
+  | { kind: "uploadTo"; entries: FsEntry[] }
+  // 0.3.9 需求8：复制/移动到目录——带目录浏览选择的专用对话框（替代旧 Prompt 手输）
+  | { kind: "copyMove"; mode: "copy" | "move"; items: FsEntry[] }
   // 0.1.4（需求2）：设置不再是对话框，并入视图体系（view === "settings"，主区整页视图）
   | { kind: "preview"; entry: FsEntry }
   | { kind: "share"; target: { path: string; isDir: boolean } }
@@ -167,8 +171,9 @@ export default function App() {
   const [dialog, setDialog] = useState<Dialog>({ kind: "none" });
   // 0.1.7：查看覆盖层（双击可预览类型→主区就地显示；非 Dialog，弹窗仍可在其上叠加）
   const [viewing, setViewing] = useState<FsEntry | null>(null);
-  // 本地文件右键菜单（需求7）
-  const [ctx, setCtx] = useState<{ entry: FsEntry; x: number; y: number } | null>(null);
+  // 本地文件右键菜单（需求7）；0.3.9 需求6：收**当前批量选择**——右键点中的条目
+  // 若在选择集内则 entries=整组选择（菜单出"上传所选 N 项到远程…"），否则单项。
+  const [ctx, setCtx] = useState<{ entries: FsEntry[]; x: number; y: number } | null>(null);
   const [toast, setToast] = useState("");
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const [groupByKind, setGroupByKind] = useState(false);
@@ -526,6 +531,9 @@ export default function App() {
    * 上传/导入（需求3 覆盖冲突保护）。服务端模式入队执行：
    * 传输面板可暂停→断点续传、失败重试；覆盖任务的 BaseHash 由任务执行时
    * 重新 stat 取得（并发状态最新）。本地模式保持即时导入。
+   * 0.3.9 需求5：选择框改**多选**（multiple:true）——一次挑多个文件批量上传/
+   * 导入；服务端模式每个文件独立入队（单文件失败互不影响，传输面板逐行处理），
+   * 已存在的目标逐个二次确认。
    */
   async function upload() {
     const source = api.source();
@@ -534,58 +542,70 @@ export default function App() {
       setDialog({ kind: "login", serverId: api.active().serverId ?? "" });
       return;
     }
-    const picked = await openDialog({ multiple: false, title: "选择要上传的文件" });
+    const picked = await openDialog({ multiple: true, title: "选择要上传的文件（可多选）" });
     if (!picked) return;
-    const local = String(picked);
-    const name = local.split(/[\\/]/).pop() ?? "file";
-    const transferId = uid();
+    const locals = (Array.isArray(picked) ? picked : [picked]).map(String).filter(Boolean);
+    if (!locals.length) return;
 
     const a = api.active();
     if (source.kind === "server" && a.serverId) {
-      // 目标已存在 → 二次确认；确认覆盖后由 run() 执行时取哈希做乐观并发锁
-      let overwrite = false;
-      try {
-        await source.stat(joinPath(path, name));
-        overwrite = await askConfirmAsync(
-          `「${name}」已存在，覆盖上传？`,
-          ["服务端会先保存旧内容为历史版本，可回滚。"]
-        );
-        if (!overwrite) return;
-      } catch {
-        /* 目标不存在：断言新文件（期间被他人创建则报冲突） */
+      let queuedN = 0;
+      for (const local of locals) {
+        const name = local.split(/[\\/]/).pop() ?? "file";
+        // 目标已存在 → 二次确认；确认覆盖后由 run() 执行时取哈希做乐观并发锁
+        let overwrite = false;
+        try {
+          await source.stat(joinPath(path, name));
+          overwrite = await askConfirmAsync(
+            `「${name}」已存在，覆盖上传？`,
+            ["服务端会先保存旧内容为历史版本，可回滚。"]
+          );
+          if (!overwrite) continue;
+        } catch {
+          /* 目标不存在：断言新文件（期间被他人创建则报冲突） */
+        }
+        const transferId = uid();
+        enqueue({
+          id: transferId,
+          kind: "upload",
+          serverId: a.serverId,
+          rootId: a.rootId,
+          name,
+          remotePath: joinPath(path, name),
+          localPath: local,
+          ...(overwrite ? { overwrite: true } : { baseHash: "-" }),
+        });
+        watchTransfer(transferId, "上传");
+        queuedN++;
       }
-      enqueue({
-        id: transferId,
-        kind: "upload",
-        serverId: a.serverId,
-        rootId: a.rootId,
-        name,
-        remotePath: joinPath(path, name),
-        localPath: local,
-        ...(overwrite ? { overwrite: true } : { baseHash: "-" }),
-      });
-      notify(`已加入上传队列：${name}`);
-      watchTransfer(transferId, "上传");
+      if (queuedN) notify(`已加入上传队列：${queuedN} 个文件`);
       return;
     }
 
-    // 本地模式：即时导入（LocalSource 内部 reportLocal 记录进度）
-    try {
+    // 本地模式：即时导入（LocalSource 内部 reportLocal 记录进度），多选逐个执行
+    let doneN = 0;
+    let lastErr = "";
+    for (const local of locals) {
+      const name = local.split(/[\\/]/).pop() ?? "file";
       try {
-        await source.stat(joinPath(path, name));
-        const ok = await askConfirmAsync(`「${name}」已存在，覆盖导入？`, ["旧内容将保存为历史版本。"]);
-        if (!ok) return;
-      } catch {
-        /* 新文件 */
+        try {
+          await source.stat(joinPath(path, name));
+          const ok = await askConfirmAsync(`「${name}」已存在，覆盖导入？`, ["旧内容将保存为历史版本。"]);
+          if (!ok) continue;
+        } catch {
+          /* 新文件 */
+        }
+        await source.uploadFile(local, path, uid());
+        doneN++;
+      } catch (e) {
+        const msg = String(e);
+        if (msg.includes("conflict")) lastErr = "上传冲突：目标文件已被其他客户端修改，请刷新后重试";
+        else if (!msg.includes("取消")) lastErr = "上传失败: " + msg;
       }
-      await source.uploadFile(local, path, transferId);
-      notify("上传完成");
-      refresh();
-    } catch (e) {
-      const msg = String(e);
-      if (msg.includes("conflict")) notify("上传冲突：目标文件已被其他客户端修改，请刷新后重试");
-      else if (!msg.includes("取消")) notify("上传失败: " + msg);
     }
+    if (doneN) notify(locals.length > 1 ? `已导入 ${doneN} 个文件` : "上传完成");
+    else if (lastErr) notify(lastErr);
+    if (doneN) refresh();
   }
 
   /** Promise 化的确认框（确认 true / 取消 false）。 */
@@ -615,12 +635,22 @@ export default function App() {
       return;
     }
     const a = api.active();
+    // 0.3.9 需求7：多选下载**只选一次保存目录**——选定目录后全部文件按原名落
+    // 进去（旧实现逐文件弹保存框，选 N 个文件就要点 N 次）；单文件保持另存为。
+    const files = items.filter((i) => !i.isDir);
+    if (items.some((i) => i.isDir)) notify("目录下载暂不支持，请进入目录选择文件");
+    let dirDest = "";
+    if (files.length > 1) {
+      const dir = await openDialog({ directory: true, title: `选择 ${files.length} 个文件的下载目录` });
+      if (!dir) return;
+      dirDest = String(dir);
+    }
     for (const it of items) {
-      if (it.isDir) {
-        notify("目录下载暂不支持，请进入目录选择文件");
-        continue;
-      }
-      const dest = await saveDialog({ defaultPath: it.name, title: `下载 ${it.name}` });
+      if (it.isDir) continue;
+      const dest =
+        dirDest && files.length > 1
+          ? dirDest.replace(/[\\/]+$/, "") + "/" + it.name
+          : await saveDialog({ defaultPath: it.name, title: `下载 ${it.name}` });
       if (!dest) continue;
       // 服务端模式：入队执行（.part 断点，暂停→继续、失败→重试在传输面板，需求4/5）
       if (source.kind === "server" && a.serverId) {
@@ -673,6 +703,17 @@ export default function App() {
       watchTransfer(id, "上传");
     }
     notify(`已加入上传队列：${entry.name} → ${targets.length} 个服务端（见"传输"界面）`);
+  }
+
+  /** 0.3.9 需求5/6：批量上传入口——对整组选中项逐个走既有单条目管线
+   *  （文件→uploadToServers 多服务端入队；目录→uploadDirToServers 整树上传，
+   *  含 /check 预检与差异询问，多目录时依次弹出）。 */
+  async function uploadEntriesToServers(entries: FsEntry[], targets: { serverId: string; rootId: string }[]) {
+    setDialog({ kind: "none" });
+    for (const en of entries) {
+      if (en.isDir) await uploadDirToServers(en, targets);
+      else uploadToServers(en, targets);
+    }
   }
 
   /** 需求41：右键本地目录 → 整树上传。0.3.2 完整时序：fs_walk 枚举 → **预检**
@@ -798,13 +839,20 @@ export default function App() {
   /** 目录重传预检（0.3.2）：两遍 /check + 差异弹窗；产出实际入队子任务与跳过数。
    *  0.3.7 需求2：①pass2 哈希的相对路径改为**根相对**（dirRel/relPath——旧实现
    *  按遍历目录相对解析，全部 miss 成 null，pass2 实际从未生效，unknown 判定
-   *  长期空转）；②子任务随带 mtimeMs/sha 内容证据入账本，恢复对账有判据。 */
+   *  长期空转）；②子任务随带 mtimeMs/sha 内容证据入账本，恢复对账有判据。
+   *  **0.3.9 根修（目录上传全军覆没）**：形参顺序曾与调用点错位——旧签名
+   *  (dirName, dirAbs, dirRel) 被按 (entry.path, entry.name, 绝对路径) 传入，
+   *  于是 localPath 拼成 "<目录名>/<rel>" 的**相对路径**（非绝对），每个子文件
+   *  在 Rust 侧 stat/open 即失败：整组 0 字节、全部标失败（用户截图：117/117
+   *  失败）。现形参按调用点实参顺序重命名对齐：dirRel=entry.path（fs_file_hashes
+   *  判据用）、dirName=entry.name（远端前缀，与 serverMkdirs 的 dirs 一致）、
+   *  dirAbs=本机绝对路径（localPath 组合用）。 */
   async function planDirUpload(
     t: { serverId: string; rootId: string },
     srvName: string,
+    dirRel: string,
     dirName: string,
     dirAbs: string,
-    dirRel: string,
     files: { name: string; relPath: string; size: number; mtimeMs: number }[]
   ): Promise<{ children: GroupChildSpec[]; skipped: number }> {
     const remoteOf = (rel: string) => `${dirName}/${rel}`;
@@ -909,25 +957,23 @@ export default function App() {
     });
   }
 
+  // 0.3.9 需求8：改走带目录浏览的 CopyMoveDialog（旧 Prompt 只能手输相对路径）
   function copyMove(items: FsEntry[], mode: "copy" | "move") {
-    setDialog({
-      kind: "prompt",
-      title: mode === "copy" ? "复制到目录" : "移动到目录",
-      label: "目标目录（相对根目录，留空为根）",
-      initial: path,
-      onOk: async (v) => {
-        setDialog({ kind: "none" });
-        try {
-          const dest = v.trim().replace(/\/+$/, "");
-          const source = api.source();
-          if (mode === "copy") await source.copy(items.map((i) => i.path), dest);
-          else await source.move(items.map((i) => i.path), dest);
-          refresh();
-        } catch (e) {
-          setError(String(e));
-        }
-      },
-    });
+    setDialog({ kind: "copyMove", mode, items });
+  }
+
+  async function runCopyMove(items: FsEntry[], mode: "copy" | "move", v: string) {
+    setDialog({ kind: "none" });
+    try {
+      const dest = v.trim().replace(/\/+$/, "");
+      const source = api.source();
+      if (mode === "copy") await source.copy(items.map((i) => i.path), dest);
+      else await source.move(items.map((i) => i.path), dest);
+      notify(mode === "copy" ? `已复制 ${items.length} 项 → ${dest || "根目录"}` : `已移动 ${items.length} 项 → ${dest || "根目录"}`);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   function jumpTo(hit: SearchHit) {
@@ -1066,7 +1112,12 @@ export default function App() {
               })
             }
             onVersions={(e) => setDialog({ kind: "versions", entry: e })}
-            onCtxEntry={src?.kind === "local" && cfg.servers.length > 0 ? (e, x, y) => setCtx({ entry: e, x, y }) : undefined}
+            onCtxEntry={
+              src?.kind === "local" && cfg.servers.length > 0
+                ? (e, x, y, sel) => setCtx({ entries: sel.length > 1 && sel.some((s) => s.path === e.path) ? sel : [e], x, y })
+                : undefined
+            }
+            onUploadRemote={src?.kind === "local" && cfg.servers.length > 0 ? (entries) => setDialog({ kind: "uploadTo", entries }) : undefined}
           />
         )}
 
@@ -1262,12 +1313,19 @@ export default function App() {
       {dialog.kind === "uploadTo" && (
         <UploadToDialog
           cfg={cfg}
-          fileName={dialog.entry.name}
-          isDir={dialog.entry.isDir}
+          entries={dialog.entries}
           onCancel={() => setDialog({ kind: "none" })}
-          onSubmit={(targets) =>
-            dialog.entry.isDir ? uploadDirToServers(dialog.entry, targets) : uploadToServers(dialog.entry, targets)
-          }
+          onSubmit={(targets) => void uploadEntriesToServers(dialog.entries, targets)}
+        />
+      )}
+
+      {dialog.kind === "copyMove" && (
+        <CopyMoveDialog
+          mode={dialog.mode}
+          items={dialog.items}
+          initial={path}
+          onOk={(v) => void runCopyMove(dialog.items, dialog.mode, v)}
+          onCancel={() => setDialog({ kind: "none" })}
         />
       )}
 
@@ -1285,22 +1343,34 @@ export default function App() {
           x={ctx.x}
           y={ctx.y}
           items={
-            [
-              ...(ctx.entry.isDir
-                ? [{ label: "打开", icon: <IconEye size={13} />, onSelect: () => openEntry(ctx.entry) }]
-                : viewableType(ctx.entry)
-                  ? // 0.1.7 查看/预览分离：可预览类型两项都给（查看=主区大图，预览=弹窗小图）
-                    [
-                      { label: "查看", icon: <IconExpand size={13} />, onSelect: () => openEntry(ctx.entry) },
-                      { label: "预览", icon: <IconEye size={13} />, onSelect: () => previewEntry(ctx.entry) },
-                    ]
-                  : [{ label: "预览", icon: <IconEye size={13} />, onSelect: () => previewEntry(ctx.entry) }]),
-              {
-                label: ctx.entry.isDir ? "上传目录到远程…" : "上传到远程…",
-                icon: <IconUpload size={13} />,
-                onSelect: () => setDialog({ kind: "uploadTo", entry: ctx.entry }),
-              },
-            ] as CtxItem[]
+            (ctx.entries.length > 1
+              ? // 0.3.9 需求6：右键点中的条目在选择集内→整组批量上传
+                [
+                  {
+                    label: `上传所选 ${ctx.entries.length} 项到远程…`,
+                    icon: <IconUpload size={13} />,
+                    onSelect: () => setDialog({ kind: "uploadTo", entries: ctx.entries }),
+                  },
+                ]
+              : (() => {
+                  const e = ctx.entries[0];
+                  return [
+                    ...(e.isDir
+                      ? [{ label: "打开", icon: <IconEye size={13} />, onSelect: () => openEntry(e) }]
+                      : viewableType(e)
+                        ? // 0.1.7 查看/预览分离：可预览类型两项都给（查看=主区大图，预览=弹窗小图）
+                          [
+                            { label: "查看", icon: <IconExpand size={13} />, onSelect: () => openEntry(e) },
+                            { label: "预览", icon: <IconEye size={13} />, onSelect: () => previewEntry(e) },
+                          ]
+                        : [{ label: "预览", icon: <IconEye size={13} />, onSelect: () => previewEntry(e) }]),
+                    {
+                      label: e.isDir ? "上传目录到远程…" : "上传到远程…",
+                      icon: <IconUpload size={13} />,
+                      onSelect: () => setDialog({ kind: "uploadTo", entries: [e] }),
+                    },
+                  ];
+                })()) as CtxItem[]
           }
           onClose={() => setCtx(null)}
         />

@@ -63,8 +63,13 @@ interface Props {
   onShare(entry: FsEntry): void;
   onAcl(entry: FsEntry | null): void;
   onVersions(entry: FsEntry): void;
-  /** 右键菜单（需求7）：App 仅在本地模式且有已配置服务端时注入 */
-  onCtxEntry?(e: FsEntry, x: number, y: number): void;
+  /** 右键菜单（需求7）：App 仅在本地模式且有已配置服务端时注入。
+   *  0.3.9 需求6：随条目一并交出**当前批量选择**（右键点中的条目在选择集内
+   *  时 App 出"上传所选 N 项到远程…"整组菜单项）。 */
+  onCtxEntry?(e: FsEntry, x: number, y: number, sel: FsEntry[]): void;
+  /** 0.3.9 需求5：批量上传——把选中整组上传到所选服务端（目录走整树上传）。
+   *  App 仅在本地模式且有已配置服务端时注入；工具栏 [批量操作] 态显示入口。 */
+  onUploadRemote?(entries: FsEntry[]): void;
 }
 
 const KIND_ORDER = ["dir", "image", "video", "audio", "document", "archive", "code", "other"];
@@ -466,12 +471,14 @@ export default function FileView(p: Props) {
           <tr
             key={e.path}
             className={sel.has(e.path) ? "row selected" : "row"}
-            onClick={(ev) => toggle(e, bulk && (ev.ctrlKey || ev.metaKey), bulk && ev.shiftKey)}
+            // 0.3.9 需求4：批量态下单击行=**增量勾选/取消**（等价点勾选框，不清
+            // 已选）；Shift=范围选；默认态单击仍=单选替换。
+            onClick={(ev) => toggle(e, bulk, bulk && ev.shiftKey)}
             onDoubleClick={() => p.onOpen(e)}
             onContextMenu={(ev) => {
               if (!p.onCtxEntry) return;
               ev.preventDefault();
-              p.onCtxEntry(e, ev.clientX, ev.clientY);
+              p.onCtxEntry(e, ev.clientX, ev.clientY, selEntries);
             }}
             title={
               (e.isDir
@@ -479,7 +486,7 @@ export default function FileView(p: Props) {
                 : viewableType(e)
                   ? "双击查看；单击选择"
                   : "双击预览；单击选择") +
-              (bulk ? "，Shift+单击范围选，Ctrl+单击加选" : "（点［批量操作］进入多选）") +
+              (bulk ? "（增量勾选），Shift+单击范围选" : "（点［批量操作］进入多选）") +
               "；右键菜单"
             }
           >
@@ -549,10 +556,21 @@ export default function FileView(p: Props) {
         <button className="btn" disabled={readOnly || !selEntries.length} title={roTip} onClick={() => p.onCopyMove(selEntries, "move")}>
           <IconMove size={15} /> 移动
         </button>
+        {/* 0.3.9 需求5：批量上传——批量态把选中整组（文件+目录）上传到远程 */}
+        {p.onUploadRemote && (
+          <button
+            className="btn"
+            disabled={!bulk || !selEntries.length}
+            title={bulk ? "把选中项上传到所选服务端（目录按整树上传）" : "进入批量操作后可用"}
+            onClick={() => p.onUploadRemote!(selEntries)}
+          >
+            <IconUpload size={15} /> 上传所选到远程…
+          </button>
+        )}
         {/* 0.3.8 需求4：批量操作显式开关 + 状态条（仅批量模式） */}
         <button
           className={bulk ? "btn small primary" : "btn small"}
-          title={bulk ? "退出批量操作（清空选择）" : "进入批量操作：复选框多选、Shift 范围选、Ctrl+A 全选"}
+          title={bulk ? "退出批量操作（清空选择）" : "进入批量操作：点行/点框都勾选、Shift 范围选、Ctrl+A 全选"}
           onClick={toggleBulk}
         >
           <IconLayers size={13} /> {bulk ? "退出批量" : "批量操作"}
@@ -642,7 +660,9 @@ export default function FileView(p: Props) {
         </div>
       )}
 
-      <div className="card table-wrap" onClick={() => setSel(new Set())}>
+      {/* 0.3.9 需求4：批量态点空白区**不再清空**已选（"没点到文件其他已选中的
+          被清空"的根因）；清空走状态条［取消选择］/退出批量。默认态维持单击空白取消选择。 */}
+      <div className="card table-wrap" onClick={() => { if (!bulk) setSel(new Set()); }}>
         {p.loading ? (
           <div className="empty">
             <div className="spinner" /> 加载中…
@@ -667,7 +687,7 @@ export default function FileView(p: Props) {
                     onToggle={toggle}
                     onOpen={p.onOpen}
                     onPreview={p.onPreview}
-                    onCtx={p.onCtxEntry}
+                    onCtx={p.onCtxEntry ? (e, x, y) => p.onCtxEntry!(e, x, y, selEntries) : undefined}
                   />
                 ) : (
                   listBody(list)
@@ -686,7 +706,7 @@ export default function FileView(p: Props) {
               onToggle={toggle}
               onOpen={p.onOpen}
               onPreview={p.onPreview}
-              onCtx={p.onCtxEntry}
+              onCtx={p.onCtxEntry ? (e, x, y) => p.onCtxEntry!(e, x, y, selEntries) : undefined}
             />
           </div>
         ) : (

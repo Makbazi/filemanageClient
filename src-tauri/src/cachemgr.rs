@@ -27,6 +27,36 @@ static MEDIA_BYTES: AtomicU64 = AtomicU64::new(0);
 const STALE_SCRATCH_AGE_MS: u64 = 24 * 3600 * 1000; // .part/.raw-src 孤儿判定
 const SWEEP_INTERVAL_SECS: u64 = 300; // 周期巡检
 
+// ---------- 在服保护集（0.3.9 修"ffmpeg 转码不可用（实际可用）"根因） ----------
+//
+// 本地模式媒体缓存条目是**硬链接**——mtime 与用户源文件同 inode（旧拍摄日期）。
+// LRU 按 mtime 升序淘汰：缓存接近上限时，刚交付（甚至正在被 ffmpeg 子进程/
+// fmc 协议逐次打开）的旧素材条目会**最先被逐**——media_cache_path 创建后同函数
+// 内的 maybe_enforce 就能把即将返回的路径删掉，前端拿到不存在的路径，
+// ffmpeg_playable 报"文件不可访问: …(os error 2)"→ 面板却冒充"ffmpeg 转码播放
+// 不可用"（用户实测：设置页探测明明可用）。300s 巡检同理可杀掉观看中的条目。
+// 修法：交付点 pin 路径（有界 FIFO），enforce 淘汰循环跳过在服条目。容量 32
+// 足够同时观看+账本恢复的场景；被挤出的最老 pin 回到正常 LRU 竞争（unlink 只
+// 断链接不伤用户源文件，重建成本=再 hard_link 一次）。
+const PIN_CAP: usize = 32;
+
+fn pinned() -> &'static std::sync::Mutex<Vec<PathBuf>> {
+    static PIN: std::sync::OnceLock<std::sync::Mutex<Vec<PathBuf>>> = std::sync::OnceLock::new();
+    PIN.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 标记"刚交付/正在被使用"的缓存条目（media_cache_path 的命中与新建成品都调）。
+pub fn pin(path: &Path) {
+    let mut v = pinned().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = v.iter().position(|p| p == path) {
+        v.remove(i);
+    }
+    v.push(path.to_path_buf());
+    while v.len() > PIN_CAP {
+        v.remove(0);
+    }
+}
+
 pub fn limit_bytes(st: &AppState) -> u64 {
     st.config().cache.max_disk_mb.saturating_mul(1 << 20)
 }
@@ -110,13 +140,21 @@ pub fn enforce(st: &AppState) -> (usize, u64) {
         true
     });
     // 2) 超限：按 mtime 升序（最久未访问先走）淘汰至 90%（硬链条目 unlink
-    //    仅断开链接，用户源文件无恙）
+    //    仅断开链接，用户源文件无恙）。0.3.9：在服保护集内条目跳过——硬链
+    //    旧素材条目 mtime=拍摄日期，不保护会"刚交付即被淘汰"（见 pin 注释）。
     if total > limit {
         files.sort_by_key(|(mt, _, _)| *mt);
         let target = limit / 10 * 9;
+        let pins: Vec<PathBuf> = pinned()
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default();
         for (_, len, p) in files {
             if total <= target {
                 break;
+            }
+            if pins.iter().any(|q| q == &p) {
+                continue;
             }
             if fs::remove_file(&p).is_ok() {
                 removed += 1;

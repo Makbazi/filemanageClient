@@ -40,7 +40,9 @@ export default function FileGrid(p: Props) {
             // IO 只观察带此属性的卡片；上下各 2 屏进入即排队出图）
             data-tkey={tk}
             className={p.sel.has(e.path) ? "grid-item selected" : "grid-item"}
-            onClick={(ev) => p.onToggle(e, !!p.bulk && (ev.ctrlKey || ev.metaKey), !!p.bulk && ev.shiftKey)}
+            // 0.3.9 需求4：批量态单击卡片=增量勾选/取消（点卡片与点勾选框等效，
+            // 不再"替换掉其他已选项"）；默认态单击仍=单选替换。
+            onClick={(ev) => p.onToggle(e, !!p.bulk, !!p.bulk && ev.shiftKey)}
             onDoubleClick={() => p.onOpen(e)}
             onContextMenu={(ev) => {
               if (!p.onCtx) return;
@@ -53,7 +55,7 @@ export default function FileGrid(p: Props) {
                 : viewableType(e)
                   ? "双击查看；单击选择"
                   : "双击预览；单击选择") +
-              (p.bulk ? "，Shift+单击范围选，Ctrl+单击加选" : "") +
+              (p.bulk ? "（增量勾选），Shift+单击范围选" : "") +
               "；右键菜单"
             }
           >
