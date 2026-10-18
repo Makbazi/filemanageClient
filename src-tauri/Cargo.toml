@@ -1,6 +1,6 @@
 [package]
 name = "filemanageclient"
-version = "0.3.8"
+version = "0.3.9"
 description = "FileManage 云盘式文件管理器客户端"
 authors = ["mon"]
 edition = "2021"
